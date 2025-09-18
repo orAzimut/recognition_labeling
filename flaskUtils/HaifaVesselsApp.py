@@ -40,7 +40,7 @@ LOCAL_GALLERY_PATH = r"C:\Users\OrGil.AzureAD\OneDrive - AMPC\Desktop\Azimut.ai\
 API_KEY = 'b123dc58-4c18-4b0c-9f04-82a06be63ff9'
 PORT_LAT = 32.8154
 PORT_LON = 35.0043
-SEARCH_RADIUS = 30  # km
+SEARCH_RADIUS = 1  # km
 
 # Flask Configuration
 FLASK_PORT = 5000
@@ -381,8 +381,9 @@ HTML_TEMPLATE = """
         
         <div class="gallery" id="gallery">
             {% for imo, data in imos.items() %}
-            <div class="imo-card" onclick="window.location.href='/imo/{{ imo }}'" 
-                 data-imo="{{ imo }}" data-name="{{ data.name|lower }}">
+            <div class="imo-card" 
+                 data-imo="{{ imo }}" 
+                 data-name="{{ data.name|lower }}">
                 <div class="photo-badge">{{ data.photos|length }} photos</div>
                 <img src="/image/{{ imo }}/{{ data.photos[0] }}" alt="IMO {{ imo }}" loading="lazy">
                 <div class="imo-info">
@@ -419,6 +420,35 @@ HTML_TEMPLATE = """
     </div>
     
     <script>
+        // Add event listeners to all IMO cards for both left and middle click
+        document.addEventListener('DOMContentLoaded', function() {
+            const imoCards = document.querySelectorAll('.imo-card');
+            
+            imoCards.forEach(card => {
+                // Handle mouse down events for all buttons
+                card.addEventListener('mousedown', function(e) {
+                    const imo = this.dataset.imo;
+                    const url = '/imo/' + imo;
+                    
+                    if (e.button === 0) { // Left click
+                        // Navigate in same tab
+                        window.location.href = url;
+                    } else if (e.button === 1) { // Middle click (scroll wheel click)
+                        // Open in new tab
+                        e.preventDefault();
+                        window.open(url, '_blank');
+                    }
+                });
+                
+                // Prevent default middle click behavior
+                card.addEventListener('auxclick', function(e) {
+                    if (e.button === 1) {
+                        e.preventDefault();
+                    }
+                });
+            });
+        });
+        
         function filterGallery() {
             const searchInput = document.getElementById('searchInput');
             const filter = searchInput.value.toLowerCase();
