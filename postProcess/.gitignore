@@ -1,0 +1,26 @@
+__pycache__/
+*.py[cod]
+.env
+venv/
+.idea/
+.vscode/
+*.log
+*.pth
+*.pt
+credentials.json
+
+
+# Ignore all image files
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tiff
+*.tif
+*.svg
+*.ico
+*.webp
+
+# Ignore data files
+*.npz
