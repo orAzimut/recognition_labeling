@@ -1,7 +1,8 @@
 ﻿#!/usr/bin/env python3
 """
-Enhanced Haifa Vessel Gallery System with Shipspotting Fallback
-Combines real-time IMO extraction, cloud storage sync, shipspotting scraper, and Flask gallery viewer
+Enhanced Haifa Vessel Gallery System with Shipspotting Fallback and YOLO Detection
+Combines real-time IMO extraction, cloud storage sync, shipspotting scraper, 
+Flask gallery viewer, and YOLO model inference for vessel detection
 """
 
 import os
@@ -12,13 +13,13 @@ import json
 import shutil
 import logging
 import threading
+import uuid
 from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
 from typing import List, Dict, Set, Tuple, Optional
 from io import BytesIO
 from urllib.parse import quote
-
 import requests
 import yaml
 from flask import Flask, render_template_string, send_file, jsonify
@@ -28,19 +29,35 @@ import cloudscraper
 from bs4 import BeautifulSoup
 from PIL import Image
 from requests.exceptions import RequestException
+import numpy as np
+
+# YOLO imports
+try:
+    from ultralytics import YOLO
+    YOLO_AVAILABLE = True
+except ImportError:
+    YOLO_AVAILABLE = False
+    print("Warning: ultralytics not installed. YOLO detection features will be disabled.")
+    print("Install with: pip install ultralytics")
 
 # ====================== Configuration ======================
 # You can modify these paths as needed
 CREDENTIALS_PATH = r"C:\Users\OrGil.AzureAD\OneDrive - AMPC\Desktop\Azimut.ai\recognition_gallery\resources\credentials.json"
 BUCKET_NAME = "outsource_data"
 BASE_PATH = "reidentification/bronze/raw_crops/ship_spotting"
+JSON_LABELS_PATH = "reidentification/bronze/json_lables/ship_spotting"  # Note: keeping the typo "lables" as in original
 LOCAL_GALLERY_PATH = r"C:\Users\OrGil.AzureAD\OneDrive - AMPC\Desktop\Azimut.ai\recognition_gallery\Haifa_Gallery"
+
+# YOLO Model Configuration
+YOLO_MODEL_PATH = r"C:\Users\OrGil.AzureAD\OneDrive - AMPC\Desktop\Azimut.ai\recognition_labeling\Albatross\platform\ML\models\Albatross-v0.5.pt"
+YOLO_CONFIDENCE_THRESHOLD = 0.25  # Adjust as needed
+YOLO_IOU_THRESHOLD = 0.45  # Adjust as needed
 
 # API Configuration
 API_KEY = 'b123dc58-4c18-4b0c-9f04-82a06be63ff9'
 PORT_LAT = 32.8154
 PORT_LON = 35.0043
-SEARCH_RADIUS = 1  # km
+SEARCH_RADIUS = 10  # km
 
 # Flask Configuration
 FLASK_PORT = 5000
@@ -491,7 +508,266 @@ HTML_TEMPLATE = """
 </html>
 """
 
-# ====================== Haifa Bay API Client ======================
+# ====================== YOLO Detector Class ======================
+class VesselDetector:
+    """YOLO-based vessel detector for generating Label Studio JSON annotations"""
+    
+    def __init__(self):
+        self.model = None
+        self.model_loaded = False
+        
+        if YOLO_AVAILABLE:
+            self.load_model()
+    
+    def load_model(self):
+        """Load the YOLO model"""
+        try:
+            if Path(YOLO_MODEL_PATH).exists():
+                self.model = YOLO(YOLO_MODEL_PATH)
+                self.model_loaded = True
+                logger.info(f"YOLO model loaded from {YOLO_MODEL_PATH}")
+            else:
+                logger.warning(f"YOLO model not found at {YOLO_MODEL_PATH}")
+                self.model_loaded = False
+        except Exception as e:
+            logger.error(f"Failed to load YOLO model: {e}")
+            self.model_loaded = False
+    
+    def detect_vessels(self, image_path: Path) -> List[Dict]:
+        """Run YOLO detection on an image and return detections"""
+        if not self.model_loaded or not self.model:
+            return []
+        
+        try:
+            # Run inference
+            results = self.model(
+                str(image_path),
+                conf=YOLO_CONFIDENCE_THRESHOLD,
+                iou=YOLO_IOU_THRESHOLD,
+                verbose=False
+            )
+            
+            detections = []
+            if results and len(results) > 0:
+                result = results[0]
+                
+                if result.boxes is not None and len(result.boxes) > 0:
+                    # Get image dimensions
+                    img = Image.open(image_path)
+                    img_width, img_height = img.size
+                    
+                    for box in result.boxes:
+                        # Get box coordinates (xyxy format)
+                        x1, y1, x2, y2 = box.xyxy[0].tolist()
+                        confidence = float(box.conf[0])
+                        
+                        # Get class (assuming 0=Merchant, 1=Military, etc. - adjust based on your model)
+                        class_id = int(box.cls[0])
+                        class_name = self.get_class_name(class_id)
+                        
+                        detections.append({
+                            'bbox': [x1, y1, x2, y2],
+                            'bbox_normalized': {
+                                'x': (x1 / img_width) * 100,  # Convert to percentage
+                                'y': (y1 / img_height) * 100,
+                                'width': ((x2 - x1) / img_width) * 100,
+                                'height': ((y2 - y1) / img_height) * 100
+                            },
+                            'confidence': confidence,
+                            'class': class_name,
+                            'class_id': class_id,
+                            'img_width': img_width,
+                            'img_height': img_height
+                        })
+            
+            return detections
+            
+        except Exception as e:
+            logger.error(f"Error detecting vessels in {image_path}: {e}")
+            return []
+    
+    def get_class_name(self, class_id: int) -> str:
+        """Map class ID to vessel type name"""
+        # Adjust these mappings based on your model's classes
+        class_map = {
+            0: "Merchant",
+            1: "Military",
+            2: "Fishing",
+            3: "Passenger",
+            4: "Tanker",
+            5: "Container",
+            6: "Bulk Carrier",
+            7: "General Cargo",
+            8: "Unknown"
+        }
+        return class_map.get(class_id, "Unknown")
+    
+    def create_label_studio_json(self, image_filename: str, imo: str, detections: List[Dict], vessel_details: Dict) -> Dict:
+        """Create a Label Studio compatible JSON for the detections"""
+        
+        # Construct the GCS path for the image
+        gcs_image_path = f"gs://{BUCKET_NAME}/{BASE_PATH}/IMO_{imo}/{image_filename}"
+        
+        # Get vessel info
+        vessel_info = vessel_details.get(imo, {})
+        
+        # Generate UUIDs for consistency
+        annotation_uuid = str(uuid.uuid4())
+        target_uuid = str(uuid.uuid4())
+        
+        # Current timestamp
+        current_time = datetime.now()
+        timestamp_str = current_time.strftime("%Y-%m-%d %H:%M:%S")
+        timestamp_float = current_time.timestamp()
+        
+        # Create predictions list
+        predictions_list = []
+        
+        for idx, detection in enumerate(detections):
+            # Create the result value for Label Studio format
+            result_value = {
+                "from_name": "bbox_labels",
+                "to_name": "image",
+                "type": "rectanglelabels",
+                "original_width": detection['img_width'],
+                "original_height": detection['img_height'],
+                "value": {
+                    "x": detection['bbox_normalized']['x'],
+                    "y": detection['bbox_normalized']['y'],
+                    "width": detection['bbox_normalized']['width'],
+                    "height": detection['bbox_normalized']['height'],
+                    "rectanglelabels": [detection['class']]
+                }
+            }
+            
+            predictions_list.append(result_value)
+        
+        # Build the complete JSON structure
+        label_json = {
+            "data": {
+                "image": gcs_image_path,
+                "IMO": imo,
+                "outsource_json": {
+                    "target": {
+                        "SOURCE": "shipspotting",
+                        "TYPE": "EO",
+                        "FIRST_DETECTION": timestamp_float,
+                        "last_update_time": timestamp_float,
+                        "ID": int(image_filename.split('_')[-1].split('.')[0]) if '_' in image_filename else idx,
+                        "uuid": target_uuid,
+                        "tracker_ID": int(image_filename.split('_')[-1].split('.')[0]) if '_' in image_filename else idx,
+                        "threat_level": "UNKNOWN",
+                        "quality": 10,
+                        "is_child": False,
+                        "state": "Observing",
+                        "current_coordinate": [
+                            vessel_info.get("lat"),
+                            vessel_info.get("lon")
+                        ],
+                        "long_term_history": [],
+                        "speed": vessel_info.get("speed"),
+                        "course": vessel_info.get("course"),
+                        "distance_from_platform": None,
+                        "max_distance_from_platform": None,
+                        "aspect": None,
+                        "size_m": None,
+                        "alerts": [],
+                        "classification": "boat",
+                        "identification": None,
+                        "bounding_box": {
+                            "bounding_box": detections[0]['bbox'] if detections else [0, 0, 100, 100],
+                            "padded_bounding_box": None,
+                            "identification": None,
+                            "conf": detections[0]['confidence'] if detections else 0.0,
+                            "id": int(image_filename.split('_')[-1].split('.')[0]) if '_' in image_filename else idx,
+                            "frame_count": None,
+                            "start_frame": None,
+                            "end_frame": None,
+                            "reid_count": None,
+                            "is_static": None,
+                            "emb_dist": None,
+                            "smooth_mean": None,
+                            "smooth_embedding_update": None
+                        },
+                        "frame_number": None,
+                        "MMSI": int(vessel_info.get("mmsi")) if vessel_info.get("mmsi", "").isdigit() else None,
+                        "SHIP_TYPE": vessel_info.get("vessel_type"),
+                        "NAME": vessel_info.get("name"),
+                        "CALL_SIGN": None,
+                        "DIMENSIONS": None,
+                        "add_counter": 0,
+                        "delete_counter": 0,
+                        "uncertainty_area": [],
+                        "children": [],
+                        "manual_not_suspicious": False,
+                        "manual_not_suspicious_for_db": False
+                    },
+                    "platform": {
+                        "platform_name": "SHIP-SPOTTING",
+                        "platform_type": "static",
+                        "location": {
+                            "latitude": None,
+                            "longitude": None,
+                            "altitude": None
+                        },
+                        "attitude": {
+                            "yaw": None,
+                            "roll": None,
+                            "pitch": None
+                        },
+                        "is_flying": False,
+                        "remote_location": {
+                            "latitude": 0,
+                            "longitude": 0
+                        },
+                        "simulator_data": 0,
+                        "camera_data": {
+                            "gimbal": {
+                                "pitch": None,
+                                "yaw": None,
+                                "roll": None
+                            },
+                            "gimbal_q": {},
+                            "gimbal_j": {},
+                            "focal_lengths": {
+                                "zoom": None
+                            },
+                            "zoom_limits": {
+                                "zoom": [None, None]
+                            },
+                            "focal_length_limits": {
+                                "zoom": [None, None]
+                            },
+                            "fov_polygons": {
+                                "zoom": []
+                            },
+                            "real_data_received": True,
+                            "center_point": [None, None],
+                            "horizon_offset": {
+                                "zoom": 0
+                            },
+                            "horizon_line_list": []
+                        },
+                        "frame_metadata": None
+                    },
+                    "uuid": annotation_uuid,
+                    "timestamp": timestamp_str,
+                    "created_at": timestamp_str
+                }
+            },
+            "predictions": [
+                {
+                    "model_version": "outsource_json",
+                    "score": detections[0]['confidence'] if detections else 0.0,
+                    "result": predictions_list
+                }
+            ] if predictions_list else [],
+            "annotations": []
+        }
+        
+        return label_json
+
+# ====================== Haifa Bay API Client (unchanged) ======================
 class HaifaBayTracker:
     """Client for fetching vessel data from Datalastic API"""
     
@@ -550,15 +826,16 @@ class HaifaBayTracker:
         unique_imos = sorted(set(imo_list))
         return unique_imos, vessel_details
 
-# ====================== Shipspotting Scraper ======================
+# ====================== Shipspotting Scraper (Enhanced) ======================
 class ShipspottingScraper:
-    """Web scraper for shipspotting.com"""
+    """Web scraper for shipspotting.com with YOLO detection support"""
     
     def __init__(self):
         self.session = cloudscraper.create_scraper()
         self.session.get(SHIPSPOTTING_BASE)  # Get cf_clearance cookie
         self.imo_regex = re.compile(r"\bIMO[:\s#]*(\d{7})\b")
         self.mmsi_regex = re.compile(r"\bMMSI[:\s#]*(\d{9})\b")
+        self.detector = VesselDetector()  # Initialize YOLO detector
         
     def fetch(self, url: str, binary: bool = False, retry: int = 2):
         """Fetch URL with retry logic"""
@@ -579,7 +856,7 @@ class ShipspottingScraper:
     
     def search_vessel_by_imo(self, imo: str, max_pages: int = 3) -> List[str]:
         """Search for photos of a vessel using IMO"""
-        logger.info(f"🔍 Searching shipspotting.com for IMO {imo}...")
+        logger.info(f"Searching shipspotting.com for IMO {imo}...")
         
         all_photo_ids = []
         page = 1
@@ -649,8 +926,65 @@ class ShipspottingScraper:
             "image_url": img_url,
         }
     
+    def process_and_upload_detections(self, imo: str, local_imo_path: Path, vessel_details: Dict, gcs_manager):
+        """Process all images with YOLO and upload detection JSONs to GCS"""
+        if not self.detector.model_loaded:
+            logger.warning("YOLO model not loaded, skipping detection processing")
+            return 0
+        
+        # Get all image files in the IMO folder
+        image_extensions = ['.jpg', '.jpeg', '.png']
+        image_files = [f for f in local_imo_path.iterdir() 
+                      if f.is_file() and f.suffix.lower() in image_extensions]
+        
+        if not image_files:
+            logger.info(f"No images found for detection in {local_imo_path}")
+            return 0
+        
+        logger.info(f"Processing {len(image_files)} images with YOLO model for IMO {imo}")
+        
+        json_count = 0
+        for image_file in image_files:
+            try:
+                # Run YOLO detection
+                detections = self.detector.detect_vessels(image_file)
+                
+                # Create Label Studio JSON
+                label_json = self.detector.create_label_studio_json(
+                    image_file.name,
+                    imo,
+                    detections,
+                    vessel_details
+                )
+                
+                # Save JSON locally (temporary)
+                json_filename = f"{image_file.stem}.json"
+                local_json_path = local_imo_path / json_filename
+                
+                with open(local_json_path, 'w') as f:
+                    json.dump(label_json, f, indent=2)
+                
+                # Upload JSON to GCS
+                json_blob_path = f"{JSON_LABELS_PATH}/IMO_{imo}/{json_filename}"
+                blob = gcs_manager.bucket.blob(json_blob_path)
+                blob.upload_from_filename(str(local_json_path))
+                
+                # Remove local JSON file to save space
+                local_json_path.unlink()
+                
+                json_count += 1
+                logger.info(f"Uploaded detection JSON for {image_file.name}")
+                
+            except Exception as e:
+                logger.error(f"Failed to process detections for {image_file.name}: {e}")
+        
+        if json_count > 0:
+            logger.info(f"Uploaded {json_count} detection JSONs to GCS for IMO {imo}")
+        
+        return json_count
+    
     def download_photos_for_imo(self, imo: str, local_imo_path: Path, vessel_details: Dict, gcs_manager=None) -> int:
-        """Download photos from shipspotting for a specific IMO"""
+        """Download photos from shipspotting for a specific IMO and process with YOLO"""
         photo_ids = self.search_vessel_by_imo(imo)
         
         if not photo_ids:
@@ -679,7 +1013,7 @@ class ShipspottingScraper:
                 jpg_file = local_imo_path / f"shipspotting_{photo_id}.jpg"
                 Image.open(BytesIO(img_bytes)).convert("RGB").save(jpg_file, quality=92)
                 success_count += 1
-                logger.info(f" Downloaded {jpg_file.name} for IMO {imo}")
+                logger.info(f"✓ Downloaded {jpg_file.name} for IMO {imo}")
             except Exception as e:
                 logger.error(f"Failed to save photo {photo_id}: {e}")
             
@@ -688,26 +1022,43 @@ class ShipspottingScraper:
         # Create/Update metadata JSON
         if success_count > 0:
             self.update_imo_metadata(imo, local_imo_path, vessel_details, success_count, "shipspotting")
-            # Upload to GCS if manager provided
+            
+            # Upload images to GCS if manager provided
             if gcs_manager:
                 upload_count = gcs_manager.upload_imo_photos(imo, local_imo_path)
-                logger.info(f"☁️ Uploaded {upload_count} photos to GCS for IMO {imo}")
+                logger.info(f"Uploaded {upload_count} photos to GCS for IMO {imo}")
+                
+                # Process images with YOLO and upload detection JSONs
+                detection_count = self.process_and_upload_detections(imo, local_imo_path, vessel_details, gcs_manager)
+                logger.info(f"Processed and uploaded {detection_count} detection JSONs for IMO {imo}")
 
         return success_count
     
     def update_imo_metadata(self, imo: str, local_imo_path: Path, vessel_details: Dict, photo_count: int, source: str):
-        """Create or update IMO metadata JSON file"""
+        """Create or update IMO metadata JSON file with sync_timestamp as a list"""
         json_file = local_imo_path / f"vessel_metadata.json"
+        current_timestamp = datetime.now().isoformat()
         
         # Load existing metadata if it exists
         if json_file.exists():
             try:
                 with open(json_file, 'r') as f:
                     metadata = json.load(f)
+                    
+                # Handle backward compatibility: convert old format to new format
+                if "sync_timestamp" in metadata:
+                    if isinstance(metadata["sync_timestamp"], str):
+                        # Convert single string to list
+                        metadata["sync_timestamp"] = [metadata["sync_timestamp"]]
+                    elif not isinstance(metadata["sync_timestamp"], list):
+                        # If it's neither string nor list, start fresh
+                        metadata["sync_timestamp"] = []
+                else:
+                    metadata["sync_timestamp"] = []
             except:
-                metadata = {}
+                metadata = {"sync_timestamp": []}
         else:
-            metadata = {}
+            metadata = {"sync_timestamp": []}
         
         # Update metadata
         vessel_info = vessel_details.get(imo, {})
@@ -726,17 +1077,23 @@ class ShipspottingScraper:
                 "source": source,
                 "photo_count": photo_count,
                 "downloaded_at": datetime.now().isoformat(),
-                "max_photos_limit": MAX_PHOTOS_PER_IMO if source == "shipspotting" else None
+                "max_photos_limit": MAX_PHOTOS_PER_IMO if source == "shipspotting" else None,
+                "yolo_processing": YOLO_AVAILABLE and self.detector.model_loaded
             },
-            "sync_timestamp": datetime.now().isoformat(),
             "gallery_path": str(local_imo_path)
         })
+        
+        # Add current timestamp to the list if not already present (within same minute)
+        if not metadata["sync_timestamp"] or not any(
+            current_timestamp[:16] == ts[:16] for ts in metadata["sync_timestamp"]
+        ):
+            metadata["sync_timestamp"].append(current_timestamp)
         
         # Save updated metadata
         with open(json_file, 'w') as f:
             json.dump(metadata, f, indent=2)
 
-# ====================== GCS Manager ======================
+# ====================== GCS Manager (unchanged) ======================
 class GCSManager:
     """Manager for Google Cloud Storage operations"""
     
@@ -753,9 +1110,9 @@ class GCSManager:
             )
             self.client = storage.Client(credentials=credentials)
             self.bucket = self.client.bucket(BUCKET_NAME)
-            logger.info(" Successfully initialized GCS client")
+            logger.info("Successfully initialized GCS client")
         except Exception as e:
-            logger.error(f" Failed to initialize GCS client: {str(e)}")
+            logger.error(f"Failed to initialize GCS client: {str(e)}")
             raise
     
     def download_imo_photos(self, imo_number: str, local_imo_path: Path, vessel_details: Dict) -> int:
@@ -796,7 +1153,7 @@ class GCSManager:
                 logger.error(f"Failed to download {blob.name}: {str(e)}")
         
         if success_count > 0:
-            # Update metadata JSON
+            # Update metadata JSON with the new list format
             scraper = ShipspottingScraper()
             scraper.update_imo_metadata(imo_number, local_imo_path, vessel_details, success_count, "gcs")
             logger.info(f"IMO {imo_number}: Downloaded {success_count}/{len(image_blobs)} photos from GCS")
@@ -821,13 +1178,14 @@ class GCSManager:
                     # Upload the file
                     blob.upload_from_filename(str(file_path))
                     uploaded_count += 1
-                    logger.info(f"☁️ Uploaded {file_path.name} to GCS for IMO {imo_number}")
+                    logger.info(f"Uploaded {file_path.name} to GCS for IMO {imo_number}")
                     
                 except Exception as e:
                     logger.error(f"Failed to upload {file_path.name}: {e}")
         
         return uploaded_count
-# ====================== Gallery Synchronizer ======================
+
+# ====================== Gallery Synchronizer (unchanged) ======================
 class GallerySynchronizer:
     """Handles synchronization between API, GCS, and local storage"""
     
@@ -838,6 +1196,7 @@ class GallerySynchronizer:
         self.gallery_path = Path(LOCAL_GALLERY_PATH)
         self.vessel_details = {}
         self.last_sync_time = None
+        self.current_imos_in_bay = set()  # Initialize this attribute
         
     def ensure_gallery_directory(self):
         """Create gallery directory if it doesn't exist"""
@@ -863,7 +1222,7 @@ class GallerySynchronizer:
             imo_path = self.gallery_path / imo
             try:
                 shutil.rmtree(imo_path)
-                logger.info(f" Removed old IMO folder: {imo}")
+                logger.info(f"Removed old IMO folder: {imo}")
             except Exception as e:
                 logger.error(f"Failed to remove {imo}: {e}")
     
@@ -878,17 +1237,84 @@ class GallerySynchronizer:
                 return True
         return False
     
+    def update_sync_timestamp_for_imo(self, imo: str, vessel_details: Dict):
+        """Update only the sync_timestamp for an IMO that already has photos"""
+        local_imo_path = self.gallery_path / imo
+        json_file = local_imo_path / f"vessel_metadata.json"
+        current_timestamp = datetime.now().isoformat()
+        
+        if json_file.exists():
+            try:
+                with open(json_file, 'r') as f:
+                    metadata = json.load(f)
+                    
+                # Handle backward compatibility
+                if "sync_timestamp" in metadata:
+                    if isinstance(metadata["sync_timestamp"], str):
+                        metadata["sync_timestamp"] = [metadata["sync_timestamp"]]
+                    elif not isinstance(metadata["sync_timestamp"], list):
+                        metadata["sync_timestamp"] = []
+                else:
+                    metadata["sync_timestamp"] = []
+                    
+                # Update vessel info with latest data
+                vessel_info = vessel_details.get(imo, {})
+                if vessel_info:
+                    metadata.update({
+                        "vessel_name": vessel_info.get("name", metadata.get("vessel_name", "Unknown")),
+                        "vessel_type": vessel_info.get("vessel_type", metadata.get("vessel_type", "Unknown")),
+                        "mmsi": vessel_info.get("mmsi", metadata.get("mmsi", "")),
+                        "last_position": {
+                            "lat": vessel_info.get("lat", 0),
+                            "lon": vessel_info.get("lon", 0),
+                            "timestamp": vessel_info.get("timestamp", "")
+                        },
+                        "destination": vessel_info.get("destination", ""),
+                    })
+                    
+            except:
+                # If file exists but can't be read, create fresh metadata
+                metadata = {"sync_timestamp": []}
+        else:
+            # Create new metadata file if it doesn't exist
+            metadata = {"sync_timestamp": []}
+            vessel_info = vessel_details.get(imo, {})
+            metadata.update({
+                "imo": imo,
+                "vessel_name": vessel_info.get("name", "Unknown"),
+                "vessel_type": vessel_info.get("vessel_type", "Unknown"),
+                "mmsi": vessel_info.get("mmsi", ""),
+                "last_position": {
+                    "lat": vessel_info.get("lat", 0),
+                    "lon": vessel_info.get("lon", 0),
+                    "timestamp": vessel_info.get("timestamp", "")
+                },
+                "destination": vessel_info.get("destination", ""),
+                "gallery_path": str(local_imo_path)
+            })
+        
+        # Add current timestamp to the list
+        if not metadata["sync_timestamp"] or not any(
+            current_timestamp[:16] == ts[:16] for ts in metadata["sync_timestamp"]
+        ):
+            metadata["sync_timestamp"].append(current_timestamp)
+            logger.info(f"Updated sync timestamp for IMO {imo}")
+        
+        # Save updated metadata
+        with open(json_file, 'w') as f:
+            json.dump(metadata, f, indent=2)
+    
     def sync_gallery(self) -> bool:
         """Main synchronization method"""
         logger.info("=" * 60)
-        logger.info(" Starting gallery synchronization...")
+        logger.info("Starting gallery synchronization...")
         
         try:
             # Ensure gallery directory exists
             self.ensure_gallery_directory()
             
             # Get current IMOs from API
-            logger.info(" Fetching current vessels in Haifa Bay...")
+            logger.info("Fetching current vessels in Haifa Bay...")
             imo_list, vessel_details = self.tracker.get_imo_numbers_with_details()
             self.vessel_details = vessel_details
             self.current_imos_in_bay = set(imo_list)  # Store current IMOs
@@ -903,6 +1329,16 @@ class GallerySynchronizer:
             current_imos = set(imo_list)
             local_imos = self.get_current_local_imos()
             
+            # Update sync timestamps for ALL IMOs found in API call
+            for imo in current_imos:
+                local_imo_path = self.gallery_path / imo
+                if local_imo_path.exists():
+                    # IMO folder exists, update its timestamp
+                    self.update_sync_timestamp_for_imo(imo, self.vessel_details)
+                else:
+                    # IMO folder doesn't exist, it will be created when downloading photos
+                    logger.info(f"New IMO {imo} detected, will create folder when downloading photos")
+            
             # Find what needs to be downloaded
             to_download = current_imos - local_imos
             
@@ -913,7 +1349,7 @@ class GallerySynchronizer:
                 if not self.check_imo_has_photos(local_imo_path):
                     imos_needing_photos.append(imo)
             
-            logger.info(f" Status: {len(local_imos)} existing, {len(to_download)} new IMOs, {len(imos_needing_photos)} need photos")
+            logger.info(f"Status: {len(local_imos)} existing, {len(to_download)} new IMOs, {len(imos_needing_photos)} need photos")
             
             # Process IMOs needing photos
             for imo in imos_needing_photos:
@@ -921,34 +1357,37 @@ class GallerySynchronizer:
                 local_imo_path.mkdir(parents=True, exist_ok=True)
                 
                 # Try GCS first
-                logger.info(f" Attempting to download IMO {imo} from GCS...")
+                logger.info(f"Attempting to download IMO {imo} from GCS...")
                 photo_count = self.gcs_manager.download_imo_photos(imo, local_imo_path, self.vessel_details)
                 
                 # If no photos from GCS, try shipspotting
                 if photo_count == 0:
-                    logger.info(f" No GCS photos for IMO {imo}, trying shipspotting.com...")
-                    photo_count = self.scraper.download_photos_for_imo(imo, local_imo_path, self.vessel_details,self.gcs_manager)
+                    logger.info(f"No GCS photos for IMO {imo}, trying shipspotting.com...")
+                    photo_count = self.scraper.download_photos_for_imo(imo, local_imo_path, self.vessel_details, self.gcs_manager)
                     
                     if photo_count == 0:
-                        logger.warning(f" No photos found anywhere for IMO {imo}")
+                        logger.warning(f"No photos found anywhere for IMO {imo}")
+                        # Still create/update metadata even if no photos found
+                        self.update_sync_timestamp_for_imo(imo, self.vessel_details)
                     else:
-                        logger.info(f" Downloaded {photo_count} photos from shipspotting for IMO {imo}")
+                        logger.info(f"Downloaded {photo_count} photos from shipspotting for IMO {imo}")
                 else:
-                    logger.info(f" Downloaded {photo_count} photos from GCS for IMO {imo}")
+                    logger.info(f"Downloaded {photo_count} photos from GCS for IMO {imo}")
                 
                 time.sleep(0.5)  # Rate limiting
             
-            
+            # Clean up old IMOs (optional - commented out for safety)
+            # self.cleanup_old_imos(current_imos)
             
             self.last_sync_time = datetime.now()
-            logger.info(f" Synchronization complete at {self.last_sync_time}")
+            logger.info(f"Synchronization complete at {self.last_sync_time}")
             return True
             
         except Exception as e:
             logger.error(f"Synchronization failed: {e}")
             return False
 
-# ====================== Flask Application ======================
+# ====================== Flask Application (unchanged) ======================
 app = Flask(__name__)
 synchronizer = GallerySynchronizer()
 
@@ -1078,10 +1517,11 @@ def api_status():
         "current_photos": sum(len(data["photos"]) for data in current_imos.values()),
         "last_sync": synchronizer.last_sync_time.isoformat() if synchronizer.last_sync_time else None,
         "auto_sync": AUTO_SYNC,
-        "sync_interval": SYNC_INTERVAL
+        "sync_interval": SYNC_INTERVAL,
+        "yolo_enabled": YOLO_AVAILABLE and VesselDetector().model_loaded
     })
 
-# ====================== Background Sync Thread ======================
+# ====================== Background Sync Thread (unchanged) ======================
 def background_sync():
     """Background thread for automatic synchronization"""
     while AUTO_SYNC:
@@ -1092,7 +1532,7 @@ def background_sync():
             logger.error(f"Background sync error: {e}")
             time.sleep(60)  # Wait a minute before retrying
 
-# ====================== Main Entry Point ======================
+# ====================== Main Entry Point (updated) ======================
 def main():
     """Main application entry point"""
     print("\n" + "="*60)
@@ -1100,30 +1540,41 @@ def main():
     print("="*60)
     print(f"Gallery Path: {LOCAL_GALLERY_PATH}")
     print(f"GCS Bucket: {BUCKET_NAME}")
-    print(f"API Endpoint: Haifa Bay ({PORT_LAT}, {PORT_LON})")
+    print(f"📍 API Endpoint: Haifa Bay ({PORT_LAT}, {PORT_LON})")
     print(f"Search Radius: {SEARCH_RADIUS} km")
     print(f"Auto-sync: {'Enabled' if AUTO_SYNC else 'Disabled'}")
     print(f"Shipspotting fallback: Enabled (max {MAX_PHOTOS_PER_IMO} photos/vessel)")
+    
+    # Check YOLO status
+    if YOLO_AVAILABLE:
+        detector = VesselDetector()
+        if detector.model_loaded:
+            print(f"YOLO Detection: Enabled (Model: {Path(YOLO_MODEL_PATH).name})")
+        else:
+            print(f"YOLO Detection: Model not found at {YOLO_MODEL_PATH}")
+    else:
+        print("YOLO Detection: Disabled (ultralytics not installed)")
+    
     if AUTO_SYNC:
         print(f"Sync Interval: {SYNC_INTERVAL} seconds")
     print("="*60)
     
     # Initial synchronization
-    print("\n Performing initial synchronization...")
+    print("\nPerforming initial synchronization...")
     success = synchronizer.sync_gallery()
     
     if not success:
-        print("⚠️ Initial sync failed, but continuing with existing data...")
+        print("Initial sync failed, but continuing with existing data...")
     
     # Start background sync thread if enabled
     if AUTO_SYNC:
         sync_thread = threading.Thread(target=background_sync, daemon=True)
         sync_thread.start()
-        print("✓ Background sync thread started")
+        print("Background sync thread started")
     
     # Start Flask server
     print("\n" + "="*60)
-    print("🌐 Starting web server...")
+    print(" Starting web server...")
     print(f"Open your browser and go to: http://localhost:{FLASK_PORT}")
     print("Press Ctrl+C to stop the server")
     print("="*60 + "\n")
@@ -1131,7 +1582,7 @@ def main():
     try:
         app.run(host=FLASK_HOST, port=FLASK_PORT, debug=False)
     except KeyboardInterrupt:
-        print("\n\n Shutting down...")
+        print("\n\n👋 Shutting down...")
         sys.exit(0)
 
 if __name__ == "__main__":
