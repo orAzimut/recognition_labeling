@@ -1,0 +1,38 @@
+# Haifa Vessel Gallery Configuration
+
+# Google Cloud Storage Settings
+gcs:
+  credentials_path: "C:\\Users\\OrGil.AzureAD\\OneDrive - AMPC\\Desktop\\Azimut.ai\\recognition_gallery\\resources\\credentials.json"
+  bucket_name: "outsource_data"
+  base_path: "reidentification/bronze/raw_crops/ship_spotting"
+
+# Local Storage Settings
+local:
+  gallery_path: "C:\\Users\\OrGil.AzureAD\\OneDrive - AMPC\\Desktop\\Azimut.ai\\recognition_gallery\\Haifa_Gallery"
+
+# Datalastic API Settings
+api:
+  key: "b123dc58-4c18-4b0c-9f04-82a06be63ff9"
+  port:
+    name: "Haifa Bay"
+    latitude: 32.8154
+    longitude: 35.0043
+    search_radius_km: 15
+
+# Flask Server Settings
+flask:
+  host: "0.0.0.0"
+  port: 5000
+  debug: false
+
+# Synchronization Settings
+sync:
+  auto_sync: true  # Enable/disable automatic synchronization
+  interval_seconds: 3600  # How often to sync (1 hour = 3600 seconds)
+  rate_limit_delay: 0.5  # Delay between GCS downloads in seconds
+
+# Logging Settings
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  log_dir: "logs"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"

@@ -1,0 +1,80 @@
+# === Python build artifacts ===
+__pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# === Virtual environments ===
+.venv/
+venv/
+env/
+ENV/
+
+# === Jupyter notebooks checkpoints ===
+.ipynb_checkpoints/
+
+# === Logs & temp files ===
+*.log
+*.tmp
+*.swp
+.DS_Store
+Thumbs.db
+
+# === OS files ===
+desktop.ini
+
+# === IDE/project settings ===
+.vscode/
+.idea/
+*.code-workspace
+
+# === Secrets & credentials ===
+*.env
+.env.*
+*.key
+*.pem
+*.p12
+*.crt
+*.csr
+*.der
+*.jks
+credentials.json
+resources/credentials.json
+*_credentials.json
+service_account.json
+config/secrets.yaml
+config/*.secret.yaml
+token_*.txt
+apikey.txt
+
+# === Cloud & storage paths ===
+.gcloud/
+.aws/
+.azure/
+*.boto
+*.gcs
+*.pkl
+
+# === Dataset & model artifacts (optional) ===
+data/
+datasets/
+*.ckpt
+*.pth
+*.pt
+*.h5
+*.onnx
+*.tflite
+*.weights
+
+# === Label Studio / export artifacts ===
+outputs/
+cleanGroupsJson/
+matching groups/
+# === Local backup of untransformed JSONs ===
+untransformed jsons/
+# === Label Studio / export artifacts ===
+exports/
+label_studio_cache/
