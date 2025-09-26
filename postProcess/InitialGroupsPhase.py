@@ -174,6 +174,52 @@ class UUIDGroupBuilder:
     def __init__(self):
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
 
+
+
+    def _extract_timestamp_from_first_json(self, json_path: str, gcs_client: GCSClient) -> Optional[str]:
+    
+        try:
+            meta = gcs_client.download_json_metadata(json_path)
+            if meta:
+                # Try common timestamp field names
+                timestamp_fields = [
+                    'timestamp',
+                    'created_at', 
+                    'sync_timestamp',
+                    'capture_time',
+                    'frame_time'
+                ]
+                
+                for field in timestamp_fields:
+                    if field in meta:
+                        timestamp = meta[field]
+                        # Handle different timestamp formats
+                        if isinstance(timestamp, (int, float)):
+                            # Unix timestamp
+                            from datetime import datetime
+                            return datetime.fromtimestamp(timestamp).isoformat() + 'Z'
+                        elif isinstance(timestamp, str):
+                            # ISO string or other format
+                            return timestamp
+                
+                # Try nested fields
+                if 'metadata' in meta and isinstance(meta['metadata'], dict):
+                    for field in timestamp_fields:
+                        if field in meta['metadata']:
+                            timestamp = meta['metadata'][field]
+                            if isinstance(timestamp, (int, float)):
+                                from datetime import datetime
+                                return datetime.fromtimestamp(timestamp).isoformat() + 'Z'
+                            elif isinstance(timestamp, str):
+                                return timestamp
+            
+            self.logger.warning(f"No timestamp found in {json_path}")
+            return None
+            
+        except Exception as e:
+            self.logger.warning(f"Failed to extract timestamp from {json_path}: {e}")
+            return None
+
     def build_group_for_uuid(
         self,
         target_uuid: str,
@@ -189,10 +235,19 @@ class UUIDGroupBuilder:
         predictions_result = []
         jsons = []
         item_index = 0
+        
+        # Extract timestamp from first JSON
+        first_json_path = None
+        group_timestamp = None
 
-        for img in images:
+        for idx, img in enumerate(images):
             json_path = self._convert_image_path_to_json(img)
             jsons.append(json_path)
+            
+            # Extract timestamp from first JSON only
+            if idx == 0:
+                first_json_path = json_path
+                group_timestamp = self._extract_timestamp_from_first_json(json_path, gcs_client)
 
             pred = self._empty_pred(item_index)
             meta = gcs_client.download_json_metadata(json_path)
@@ -233,6 +288,8 @@ class UUIDGroupBuilder:
                 'images': images,
                 'jsons': jsons,
                 'created_at': datetime.utcnow().isoformat() + 'Z',
+                'group_timestamp': group_timestamp,  # ADD THIS LINE
+                'uuid': target_uuid,  # ADD THIS LINE for tracking
             },
             'predictions': [{
                 'model_version': 'preloaded-bboxes',
@@ -305,7 +362,7 @@ def parse_arguments() -> argparse.Namespace:
         epilog='''Examples:\n  python ship_uuid_uploader.py \\\n    --bucket azimut_data \\\n    --gcs-path "/reidentification/bronze/raw_crops/haifa/azimut-haifa" \\\n    --num-uuids 200\n'''
     )
     p.add_argument('--bucket', default='azimut_data', help='Input GCS bucket')
-    p.add_argument('--gcs-path', default='/reidentification/bronze/raw_crops/haifa/azimut-haifa/2025/09/17',
+    p.add_argument('--gcs-path', default='/reidentification/bronze/raw_crops/haifa/azimut-haifa/2025/09/25',
                    help='Base GCS path to scan for UUIDs (legacy/mission/custom supported)')
     p.add_argument('--num-uuids', type=int, default=400, help='Max UUIDs to process this run')
     p.add_argument('--output-bucket', default=None, help='Output GCS bucket (default: same as --bucket)')

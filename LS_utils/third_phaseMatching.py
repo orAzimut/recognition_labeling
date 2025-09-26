@@ -306,6 +306,12 @@ def main():
                             _norm_gs(d.get("r_id_2_jsons") or []),
                             _coerce_bboxes(d.get("r_id_2_bboxes") or []))
 
+        # Extract timestamps - ADD THESE LINES
+        r_id_1_timestamp = d.get("r_id_1_timestamp")
+        r_id_2_timestamp = d.get("r_id_2_timestamp")
+        r_id_1_uuid = d.get("r_id_1_uuid", "")
+        r_id_2_uuid = d.get("r_id_2_uuid", "")
+
         outputs.append({
             "task_id": tid,
             "annotation_id": ann.get("id"),
@@ -313,10 +319,14 @@ def main():
             "r_id_1_images": _norm_gs(d.get("r_id_1_images") or []),
             "r_id_1_jsons": _norm_gs(d.get("r_id_1_jsons") or []),
             "r_id_1_bboxes": _coerce_bboxes(d.get("r_id_1_bboxes") or []),
+            "r_id_1_timestamp": r_id_1_timestamp,  # ADD THIS LINE
+            "r_id_1_uuid": r_id_1_uuid,  # ADD THIS LINE
             "r_id_2": d.get("r_id_2"),
             "r_id_2_images": _norm_gs(d.get("r_id_2_images") or []),
             "r_id_2_jsons": _norm_gs(d.get("r_id_2_jsons") or []),
             "r_id_2_bboxes": _coerce_bboxes(d.get("r_id_2_bboxes") or []),
+            "r_id_2_timestamp": r_id_2_timestamp,  # ADD THIS LINE
+            "r_id_2_uuid": r_id_2_uuid,  # ADD THIS LINE
             "same_vessel": same_vessel,  # Added same_vessel field
         })
         new_task_ids.append(tid)

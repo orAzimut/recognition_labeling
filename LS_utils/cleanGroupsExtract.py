@@ -90,7 +90,7 @@ def gcs_upload_json(bucket_name: str, blob_path: str, obj: Any):
     blob = client.bucket(bucket_name).blob(blob_path)
     data = json.dumps(obj, indent=2, ensure_ascii=False)
     blob.upload_from_string(data, content_type="application/json")
-    print(f"✓ Uploaded to gs://{bucket_name}/{blob_path}")
+    print(f" Uploaded to gs://{bucket_name}/{blob_path}")
 
 
 # =========================
@@ -113,7 +113,7 @@ def build_review_accepted_filters_only_reviews_count() -> Dict[str, Any]:
 # =========================
 # Extraction helpers
 # =========================
-ID_NUM_RE = re.compile(r'(?:images(?:\$|\[)|\[\s*)(\d+)(?:\]|$)')
+ID_NUM_RE = re.compile(r'(:images(?:\$|\[)|\[\s*)(\d+)(?:\]|$)')
 
 def _to_dict(x):
     if hasattr(x, "model_dump"):
@@ -292,6 +292,10 @@ def process_tasks(tasks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         jsons  = data.get("jsons",  []) or t.get("jsons",  [])
         r_id = data.get("r_id", "")
         created_at = data.get("created_at") or t.get("created_at", "")
+        
+        # Extract timestamp information - ADD THESE LINES
+        group_timestamp = data.get("group_timestamp") or t.get("group_timestamp")
+        uuid = data.get("uuid") or t.get("uuid", "")
 
         all_bboxes: Dict[str, List[Dict]] = {img: [] for img in images}
         trash_urls: List[str] = []
@@ -325,7 +329,6 @@ def process_tasks(tasks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
         task_hist, per_image_counts = _summarize_by_class(all_bboxes)
 
-
         images_with_data = []
         for idx, img in enumerate(images):
             images_with_data.append({
@@ -339,10 +342,11 @@ def process_tasks(tasks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
         total_bboxes = sum(len(all_bboxes[i]) for i in images)
 
-
         processed.append({
             "task_id": t.get("id"),
             "r_id": r_id,
+            "uuid": uuid,  # ADD THIS LINE
+            "group_timestamp": group_timestamp,  # ADD THIS LINE
             "num_images": len(images),
             "created_at": created_at,
             "is_labeled": bool(t.get("is_labeled")),

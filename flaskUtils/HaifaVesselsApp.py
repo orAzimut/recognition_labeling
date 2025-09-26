@@ -212,10 +212,22 @@ HTML_TEMPLATE = """
             margin-top: 5px;
         }
         
-        .search-bar {
+        .search-section {
             padding: 20px 30px;
             background: white;
             border-bottom: 1px solid #eee;
+        }
+        
+        .search-controls {
+            display: flex;
+            gap: 15px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        
+        .search-input-container {
+            flex: 1;
+            min-width: 300px;
         }
         
         .search-input {
@@ -230,6 +242,76 @@ HTML_TEMPLATE = """
         
         .search-input:focus {
             border-color: #667eea;
+        }
+        
+        .date-range-container {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            background: #f8f9fa;
+            padding: 8px 15px;
+            border-radius: 25px;
+            border: 2px solid #e0e0e0;
+        }
+        
+        .date-range-container label {
+            color: #666;
+            font-size: 0.9em;
+            font-weight: 600;
+        }
+        
+        .date-input {
+            padding: 6px 12px;
+            border: 1px solid #ddd;
+            border-radius: 15px;
+            font-size: 14px;
+            outline: none;
+            cursor: pointer;
+            background: white;
+            transition: all 0.3s;
+        }
+        
+        .date-input:focus, .date-input:hover {
+            border-color: #667eea;
+            box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.1);
+        }
+        
+        .clear-dates-btn {
+            background: #ff6b6b;
+            color: white;
+            border: none;
+            padding: 6px 12px;
+            border-radius: 15px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: all 0.3s;
+        }
+        
+        .clear-dates-btn:hover {
+            background: #ff5252;
+            transform: scale(1.05);
+        }
+        
+        .search-hint {
+            margin-top: 12px;
+            font-size: 0.9em;
+            color: #888;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .active-filters {
+            background: #667eea;
+            color: white;
+            padding: 4px 12px;
+            border-radius: 15px;
+            font-size: 0.85em;
+            display: none;
+        }
+        
+        .active-filters.show {
+            display: inline-block;
         }
         
         .gallery {
@@ -252,6 +334,11 @@ HTML_TEMPLATE = """
         .imo-card:hover {
             transform: translateY(-5px);
             box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+        }
+        
+        .imo-card.date-filtered-out {
+            opacity: 0.3;
+            display: none;
         }
         
         .imo-card img {
@@ -279,9 +366,23 @@ HTML_TEMPLATE = """
             margin-bottom: 3px;
         }
         
+        .vessel-type {
+            color: #667eea;
+            font-size: 0.85em;
+            font-weight: 600;
+            margin-bottom: 3px;
+        }
+        
         .photo-count {
             color: #999;
             font-size: 0.85em;
+        }
+        
+        .sync-date {
+            color: #aaa;
+            font-size: 0.8em;
+            font-style: italic;
+            margin-top: 3px;
         }
         
         .photo-badge {
@@ -294,6 +395,19 @@ HTML_TEMPLATE = """
             border-radius: 15px;
             font-size: 0.85em;
             font-weight: bold;
+        }
+        
+        .type-badge {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(118, 75, 162, 0.9);
+            color: white;
+            padding: 5px 10px;
+            border-radius: 15px;
+            font-size: 0.75em;
+            font-weight: bold;
+            text-transform: uppercase;
         }
         
         .detail-gallery {
@@ -362,6 +476,14 @@ HTML_TEMPLATE = """
             cursor: pointer;
             z-index: 1001;
         }
+        
+        .no-results {
+            text-align: center;
+            padding: 40px;
+            color: #666;
+            font-size: 1.2em;
+            display: none;
+        }
     </style>
 </head>
 <body>
@@ -377,36 +499,64 @@ HTML_TEMPLATE = """
         
         <div class="stats">
             <div class="stat-card">
-                <div class="stat-number">{{ total_imos }}</div>
+                <div class="stat-number" id="activeVesselsCount">{{ total_imos }}</div>
                 <div class="stat-label">Active Vessels</div>
             </div>
             <div class="stat-card">
-                <div class="stat-number">{{ total_photos }}</div>
+                <div class="stat-number" id="totalPhotosCount">{{ total_photos }}</div>
                 <div class="stat-label">Total Photos</div>
             </div>
             <div class="stat-card">
-                <div class="stat-number">{{ avg_photos }}</div>
+                <div class="stat-number" id="avgPhotosCount">{{ avg_photos }}</div>
                 <div class="stat-label">Avg Photos/Vessel</div>
             </div>
         </div>
         
-        <div class="search-bar">
-            <input type="text" class="search-input" id="searchInput" 
-                   placeholder="Search by IMO number or vessel name..." 
-                   onkeyup="filterGallery()">
+        <div class="search-section">
+            <div class="search-controls">
+                <div class="search-input-container">
+                    <input type="text" class="search-input" id="searchInput" 
+                           placeholder="Search by IMO number, vessel name, or type (e.g., 'bulk', 'tanker', 'container')..." 
+                           onkeyup="filterGallery()">
+                </div>
+                <div class="date-range-container">
+                    <label>📅 Date Range:</label>
+                    <input type="date" class="date-input" id="fromDate" onchange="filterGallery()">
+                    <label>to</label>
+                    <input type="date" class="date-input" id="toDate" onchange="filterGallery()">
+                    <button class="clear-dates-btn" onclick="clearDateFilters()">Clear</button>
+                </div>
+            </div>
+            <div class="search-hint">
+                <span>💡 Tip: Filter by vessel types or select a date range to see vessels present during specific periods</span>
+                <span class="active-filters" id="activeFilters"></span>
+            </div>
         </div>
         
-        <div class="gallery" id="gallery">
+        <div class="no-results" id="noResults">
+            No vessels found matching your search criteria. Try different keywords or adjust the date range.
+        </div>
+        
+        <div class="gallery" id="gallery" 
+             data-current-bay-imos='{{ current_bay_imos|tojson if current_bay_imos else "[]" }}'>
             {% for imo, data in imos.items() %}
             <div class="imo-card" 
                  data-imo="{{ imo }}" 
-                 data-name="{{ data.name|lower }}">
+                 data-name="{{ data.name|lower }}"
+                 data-type="{{ data.type|lower }}"
+                 data-timestamps='{{ data.sync_timestamps|tojson if data.sync_timestamps else "[]" }}'
+                 data-in-bay-now="{{ 'true' if imo in current_bay_imos else 'false' }}">
+                <div class="type-badge">{{ data.type }}</div>
                 <div class="photo-badge">{{ data.photos|length }} photos</div>
                 <img src="/image/{{ imo }}/{{ data.photos[0] }}" alt="IMO {{ imo }}" loading="lazy">
                 <div class="imo-info">
                     <div class="imo-number">IMO {{ imo }}</div>
                     <div class="vessel-name">{{ data.name }}</div>
+                    <div class="vessel-type">Type: {{ data.type }}</div>
                     <div class="photo-count">{{ data.photos|length }} photo{% if data.photos|length > 1 %}s{% endif %}</div>
+                    {% if data.last_sync %}
+                    <div class="sync-date">Last seen: {{ data.last_sync }}</div>
+                    {% endif %}
                 </div>
             </div>
             {% endfor %}
@@ -416,7 +566,7 @@ HTML_TEMPLATE = """
         <div class="header">
             <a href="/" class="back-button">← Back to Gallery</a>
             <h1>🚢 {{ vessel_name }}</h1>
-            <p>IMO {{ imo }} - {{ photos|length }} photos available</p>
+            <p>IMO {{ imo }} • {{ vessel_type }} • {{ photos|length }} photos available</p>
         </div>
         
         <div class="detail-gallery">
@@ -464,22 +614,142 @@ HTML_TEMPLATE = """
                     }
                 });
             });
+            
+            // Set max date to today for date inputs
+            const today = new Date().toISOString().split('T')[0];
+            document.getElementById('fromDate').setAttribute('max', today);
+            document.getElementById('toDate').setAttribute('max', today);
+            
+            // Apply initial filter to show only current bay vessels (or all if date filter present)
+            filterGallery();
         });
+        
+        function clearDateFilters() {
+            document.getElementById('fromDate').value = '';
+            document.getElementById('toDate').value = '';
+            filterGallery();
+        }
         
         function filterGallery() {
             const searchInput = document.getElementById('searchInput');
-            const filter = searchInput.value.toLowerCase();
+            const fromDate = document.getElementById('fromDate').value;
+            const toDate = document.getElementById('toDate').value;
+            const filter = searchInput.value.toLowerCase().trim();
             const cards = document.querySelectorAll('.imo-card');
+            const noResults = document.getElementById('noResults');
+            const activeFilters = document.getElementById('activeFilters');
+            const gallery = document.getElementById('gallery');
+            
+            // Get current bay IMOs from data attribute
+            const currentBayImos = JSON.parse(gallery.dataset.currentBayImos || '[]');
+            const hasDateFilter = fromDate || toDate;
+            
+            let visibleCount = 0;
+            let totalVisiblePhotos = 0;
+            
+            // Parse dates if provided
+            const fromTimestamp = fromDate ? new Date(fromDate + 'T00:00:00').getTime() : null;
+            const toTimestamp = toDate ? new Date(toDate + 'T23:59:59').getTime() : null;
             
             cards.forEach(card => {
-                const imo = card.dataset.imo.toLowerCase();
+                const imo = card.dataset.imo;
+                const imoLower = imo.toLowerCase();
                 const name = card.dataset.name;
-                if (imo.includes(filter) || name.includes(filter)) {
+                const type = card.dataset.type;
+                const timestampsStr = card.dataset.timestamps;
+                const isInBayNow = card.dataset.inBayNow === 'true';
+                
+                // Default visibility: if no filters, show only current bay vessels
+                let shouldShow = false;
+                
+                if (hasDateFilter) {
+                    // When date filter is active, check ALL vessels for date match
+                    let matchesDate = false;
+                    try {
+                        const timestamps = JSON.parse(timestampsStr || '[]');
+                        for (const ts of timestamps) {
+                            const vesselTime = new Date(ts).getTime();
+                            const afterFrom = !fromTimestamp || vesselTime >= fromTimestamp;
+                            const beforeTo = !toTimestamp || vesselTime <= toTimestamp;
+                            
+                            if (afterFrom && beforeTo) {
+                                matchesDate = true;
+                                break;
+                            }
+                        }
+                    } catch (e) {
+                        console.error('Error parsing timestamps:', e);
+                    }
+                    
+                    // Apply text filter if present
+                    let matchesText = filter === '' || 
+                        imoLower.includes(filter) || 
+                        name.includes(filter) || 
+                        type.includes(filter);
+                    
+                    // Show if matches date AND text filters
+                    shouldShow = matchesDate && matchesText;
+                    
+                } else if (filter) {
+                    // Only text filter, no date filter - filter from current bay vessels only
+                    if (currentBayImos.includes(imo)) {
+                        shouldShow = imoLower.includes(filter) || 
+                                   name.includes(filter) || 
+                                   type.includes(filter);
+                    }
+                    
+                } else {
+                    // No filters at all - show only current bay vessels
+                    shouldShow = currentBayImos.includes(imo);
+                }
+                
+                // Show/hide the card
+                if (shouldShow) {
                     card.style.display = '';
+                    card.classList.remove('date-filtered-out');
+                    visibleCount++;
+                    // Count photos (assuming each card has a photo count in its badge)
+                    const photoBadge = card.querySelector('.photo-badge');
+                    if (photoBadge) {
+                        const photoCount = parseInt(photoBadge.textContent) || 0;
+                        totalVisiblePhotos += photoCount;
+                    }
                 } else {
                     card.style.display = 'none';
+                    card.classList.add('date-filtered-out');
                 }
             });
+            
+            // Update stats
+            document.getElementById('activeVesselsCount').textContent = visibleCount;
+            document.getElementById('totalPhotosCount').textContent = totalVisiblePhotos;
+            document.getElementById('avgPhotosCount').textContent = 
+                visibleCount > 0 ? Math.round(totalVisiblePhotos / visibleCount) : 0;
+            
+            // Show/hide "no results" message
+            if (visibleCount === 0 && (filter !== '' || fromDate || toDate)) {
+                noResults.style.display = 'block';
+            } else {
+                noResults.style.display = 'none';
+            }
+            
+            // Show active filters indicator
+            const filters = [];
+            if (filter) filters.push('Text: "' + filter + '"');
+            if (fromDate) filters.push('From: ' + fromDate);
+            if (toDate) filters.push('To: ' + toDate);
+            
+            if (filters.length > 0) {
+                activeFilters.textContent = '🔍 Active filters: ' + filters.join(', ');
+                activeFilters.classList.add('show');
+                
+                // Update header text when showing historical data
+                if (hasDateFilter) {
+                    activeFilters.textContent += ' (Showing all gallery history)';
+                }
+            } else {
+                activeFilters.classList.remove('show');
+            }
         }
         
         function openModal(imageSrc) {
@@ -507,7 +777,6 @@ HTML_TEMPLATE = """
 </body>
 </html>
 """
-
 # ====================== YOLO Detector Class ======================
 class VesselDetector:
     """YOLO-based vessel detector for generating Label Studio JSON annotations"""
@@ -1390,9 +1659,8 @@ class GallerySynchronizer:
 # ====================== Flask Application (unchanged) ======================
 app = Flask(__name__)
 synchronizer = GallerySynchronizer()
-
 def get_imo_photos() -> Dict:
-    """Scan gallery directory and group photos by IMO folder"""
+    """Scan gallery directory and group photos by IMO folder - ENHANCED with timestamps"""
     imo_data = {}
     gallery_path = Path(LOCAL_GALLERY_PATH)
     
@@ -1415,8 +1683,11 @@ def get_imo_photos() -> Dict:
             if photos:
                 photos.sort()
                 
-                # Try to get vessel name from metadata or vessel_details
+                # Try to get vessel name, type, and sync timestamps from metadata
                 vessel_name = "Unknown Vessel"
+                vessel_type = "Unknown Type"
+                sync_timestamps = []
+                last_sync = None
                 
                 # First try metadata JSON
                 metadata_file = imo_folder / "vessel_metadata.json"
@@ -1425,52 +1696,73 @@ def get_imo_photos() -> Dict:
                         with open(metadata_file, 'r') as f:
                             metadata = json.load(f)
                             vessel_name = metadata.get("vessel_name", "Unknown Vessel")
-                    except:
-                        pass
+                            vessel_type = metadata.get("vessel_type", "Unknown Type")
+                            
+                            # Get sync timestamps
+                            sync_ts = metadata.get("sync_timestamp", [])
+                            if isinstance(sync_ts, list):
+                                sync_timestamps = sync_ts
+                            elif isinstance(sync_ts, str):
+                                sync_timestamps = [sync_ts]
+                            
+                            # Get last sync date for display
+                            if sync_timestamps:
+                                last_ts = max(sync_timestamps)
+                                try:
+                                    last_sync_dt = datetime.fromisoformat(last_ts.replace('Z', '+00:00'))
+                                    last_sync = last_sync_dt.strftime("%Y-%m-%d %H:%M")
+                                except:
+                                    pass
+                    except Exception as e:
+                        logger.warning(f"Failed to read metadata for IMO {imo_number}: {e}")
                 
                 # Fall back to vessel_details
-                if vessel_name == "Unknown Vessel" and imo_number in synchronizer.vessel_details:
-                    vessel_name = synchronizer.vessel_details[imo_number].get("name", "Unknown Vessel")
+                if imo_number in synchronizer.vessel_details:
+                    if vessel_name == "Unknown Vessel":
+                        vessel_name = synchronizer.vessel_details[imo_number].get("name", "Unknown Vessel")
+                    if vessel_type == "Unknown Type":
+                        vessel_type = synchronizer.vessel_details[imo_number].get("vessel_type", "Unknown Type")
                 
                 imo_data[imo_number] = {
                     "photos": photos,
-                    "name": vessel_name
+                    "name": vessel_name,
+                    "type": vessel_type,
+                    "sync_timestamps": sync_timestamps,
+                    "last_sync": last_sync
                 }
     
     return imo_data
 
+
 @app.route('/')
 def index():
-    """Main gallery page"""
-    all_imo_data = get_imo_photos()  # Get ALL local IMOs
+    """Main gallery page - sends ALL vessels, JavaScript handles filtering"""
+    all_imo_data = get_imo_photos()  # Get ALL local IMOs with timestamps
     
-    # Filter to show only vessels currently in Haifa Bay
-    current_imo_data = {}
-    for imo, data in all_imo_data.items():
-        if imo in synchronizer.current_imos_in_bay:
-            current_imo_data[imo] = data
+    # Always send ALL vessels to the template
+    # JavaScript will handle showing only current bay vessels by default
+    # or all vessels when date filter is active
     
-    # If no sync has happened yet, show all (or none)
-    if not synchronizer.current_imos_in_bay:
-        current_imo_data = all_imo_data  # Or {} to show none
-    
-    total_photos = sum(len(data["photos"]) for data in current_imo_data.values())
-    avg_photos = round(total_photos / len(current_imo_data)) if current_imo_data else 0
+    total_photos = sum(len(data["photos"]) for data in all_imo_data.values())
+    avg_photos = round(total_photos / len(all_imo_data)) if all_imo_data else 0
     
     last_sync = "Never"
     if synchronizer.last_sync_time:
         last_sync = synchronizer.last_sync_time.strftime("%Y-%m-%d %H:%M:%S")
     
+    # Pass both all IMOs and current IMOs to template
     return render_template_string(
         HTML_TEMPLATE,
         view='main',
-        imos=current_imo_data,  # Only show current vessels
-        total_imos=len(current_imo_data),
+        imos=all_imo_data,  # Send ALL gallery vessels
+        current_bay_imos=list(synchronizer.current_imos_in_bay),  # Pass current bay IMOs for JavaScript filtering
+        total_imos=len(all_imo_data),
         total_photos=total_photos,
         avg_photos=avg_photos,
         last_sync=last_sync
     )
 
+# [Rest of the routes remain exactly the same]
 @app.route('/imo/<imo_number>')
 def imo_detail(imo_number):
     """Detail page for specific IMO"""
@@ -1480,14 +1772,17 @@ def imo_detail(imo_number):
         return "IMO not found", 404
     
     vessel_name = imo_data[imo_number]["name"]
+    vessel_type = imo_data[imo_number].get("type", "Unknown Type")
     
     return render_template_string(
         HTML_TEMPLATE,
         view='detail',
         imo=imo_number,
         vessel_name=vessel_name,
+        vessel_type=vessel_type,
         photos=imo_data[imo_number]["photos"]
     )
+
 
 @app.route('/image/<imo>/<filename>')
 def serve_image(imo, filename):
@@ -1520,6 +1815,7 @@ def api_status():
         "sync_interval": SYNC_INTERVAL,
         "yolo_enabled": YOLO_AVAILABLE and VesselDetector().model_loaded
     })
+
 
 # ====================== Background Sync Thread (unchanged) ======================
 def background_sync():

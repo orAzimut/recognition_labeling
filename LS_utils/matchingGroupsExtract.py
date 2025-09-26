@@ -77,16 +77,26 @@ def list_tasks(project_id: int) -> List[Dict[str, Any]]:
 
 
 def list_annotations_for_task(task_id: int) -> List[Dict[str, Any]]:
-    """Fetch full annotations for a task (includes 'result' and review fields)."""
-    r = session.get(f"{BASE_URL}/api/tasks/{task_id}/annotations", timeout=TIMEOUT)
-    if r.status_code == 404:
-        # fallback on some LS variants
-        r = session.get(f"{BASE_URL}/api/annotations", params={"task": task_id}, timeout=TIMEOUT)
-    r.raise_for_status()
+    """Fetch full annotations for a task. Return [] if task/annotations not found."""
+    try:
+        r = session.get(f"{BASE_URL}/api/tasks/{task_id}/annotations", timeout=TIMEOUT)
+        if r.status_code == 404:
+            # Some LS variants expose a flat /api/annotations?task=...
+            r = session.get(f"{BASE_URL}/api/annotations", params={"task": task_id}, timeout=TIMEOUT)
+        # If still 404 (task deleted or not visible) -> treat as no annotations
+        if r.status_code == 404:
+            return []
+        r.raise_for_status()
+    except requests.RequestException as e:
+        # Network/HTTP issues: treat as "no annotations" but log once
+        print(f"[Warn] list_annotations_for_task({task_id}) request error: {e}. Treating as no annotations.")
+        return []
+
     data = r.json()
     if isinstance(data, dict) and "results" in data:
         return data["results"]
     return data if isinstance(data, list) else []
+
 
 def is_review_accepted(ann: Dict[str, Any]) -> bool:
     """Decide if an annotation is review-accepted across common LS variants."""
@@ -249,7 +259,6 @@ def main():
 
         if tid in processed_ids:
             already_processed_task_ids.append(tid)
-            # still allow re-export? -> No; we keep registry gate.
             continue
 
         anns = list_annotations_for_task(tid)
@@ -281,6 +290,13 @@ def main():
         accepted_task_ids.append(tid)
 
         d = t.get("data", {}) or {}
+        
+        # Extract timestamps - ADD THESE LINES
+        r_id_1_timestamp = d.get("r_id_1_timestamp")
+        r_id_2_timestamp = d.get("r_id_2_timestamp")
+        r_id_1_uuid = d.get("r_id_1_uuid", "")
+        r_id_2_uuid = d.get("r_id_2_uuid", "")
+        
         outputs.append({
             "task_id": tid,
             "annotation_id": ann.get("id"),
@@ -288,10 +304,14 @@ def main():
             "r_id_1_images": _norm_gs(d.get("r_id_1_images") or []),
             "r_id_1_jsons": _norm_gs(d.get("r_id_1_jsons") or []),
             "r_id_1_bboxes": _coerce_bboxes(d.get("r_id_1_bboxes") or []),
+            "r_id_1_timestamp": r_id_1_timestamp,  # ADD THIS LINE
+            "r_id_1_uuid": r_id_1_uuid,  # ADD THIS LINE
             "r_id_2": d.get("r_id_2"),
             "r_id_2_images": _norm_gs(d.get("r_id_2_images") or []),
             "r_id_2_jsons": _norm_gs(d.get("r_id_2_jsons") or []),
             "r_id_2_bboxes": _coerce_bboxes(d.get("r_id_2_bboxes") or []),
+            "r_id_2_timestamp": r_id_2_timestamp,  # ADD THIS LINE
+            "r_id_2_uuid": r_id_2_uuid,  # ADD THIS LINE
             "same_vessel": same_vessel,  # Added same_vessel field
         })
 

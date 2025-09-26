@@ -275,7 +275,7 @@ class LabelStudioStage3Processor:
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
     
     def extract_labeling_decisions(self, labeled_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Extract labeling decisions from labeled JSON with bboxes."""
+
         decisions = []
         
         for entry in labeled_data:
@@ -284,6 +284,12 @@ class LabelStudioStage3Processor:
                 r_id_1 = entry.get('r_id_1')
                 r_id_2 = entry.get('r_id_2')
                 same_vessel = entry.get('same_vessel', 'No')  # Default to 'No' if missing
+                
+                # Extract timestamp information - ADD THESE LINES
+                r_id_1_timestamp = entry.get('r_id_1_timestamp')
+                r_id_2_timestamp = entry.get('r_id_2_timestamp')
+                r_id_1_uuid = entry.get('r_id_1_uuid', '')
+                r_id_2_uuid = entry.get('r_id_2_uuid', '')
                 
                 if not r_id_1 or not r_id_2:
                     self.logger.warning(f"Missing r_id fields in entry: {entry.keys()}")
@@ -306,14 +312,19 @@ class LabelStudioStage3Processor:
                     'r_id_1_images': r_id_1_images,
                     'r_id_1_jsons': r_id_1_jsons,
                     'r_id_1_bboxes': r_id_1_bboxes,
+                    'r_id_1_timestamp': r_id_1_timestamp,  # ADD THIS LINE
+                    'r_id_1_uuid': r_id_1_uuid,  # ADD THIS LINE
                     'r_id_2_images': r_id_2_images,
                     'r_id_2_jsons': r_id_2_jsons,
                     'r_id_2_bboxes': r_id_2_bboxes,
+                    'r_id_2_timestamp': r_id_2_timestamp,  # ADD THIS LINE
+                    'r_id_2_uuid': r_id_2_uuid,  # ADD THIS LINE
                     'original_entry': entry
                 }
                 
                 decisions.append(decision)
-                self.logger.debug(f"Extracted decision: {r_id_1} + {r_id_2} = {same_vessel} (with {len(r_id_1_bboxes)} + {len(r_id_2_bboxes)} bboxes)")
+                self.logger.debug(f"Extracted decision: {r_id_1} + {r_id_2} = {same_vessel} "
+                                f"(timestamps: {r_id_1_timestamp}, {r_id_2_timestamp})")
                 
             except Exception as e:
                 self.logger.error(f"Error processing labeled entry: {e}")
@@ -412,6 +423,28 @@ class GroupMerger:
         all_jsons = decision['r_id_1_jsons'] + decision['r_id_2_jsons']
         all_bboxes = decision['r_id_1_bboxes'] + decision['r_id_2_bboxes']
         
+        # Collect timestamps - ADD THIS SECTION
+        timestamps = []
+        if decision.get('r_id_1_timestamp'):
+            timestamps.append(decision['r_id_1_timestamp'])
+        if decision.get('r_id_2_timestamp'):
+            timestamps.append(decision['r_id_2_timestamp'])
+        
+        # Use earliest timestamp for merged group
+        if timestamps and not group.get('group_timestamp'):
+            group['group_timestamp'] = min(timestamps)
+        
+        # Collect UUIDs - ADD THIS SECTION
+        uuids = []
+        if decision.get('r_id_1_uuid'):
+            uuids.append(decision['r_id_1_uuid'])
+        if decision.get('r_id_2_uuid'):
+            uuids.append(decision['r_id_2_uuid'])
+        
+        if 'uuids' not in group:
+            group['uuids'] = set()
+        group['uuids'].update(uuids)
+        
         # Use sets to avoid duplicates, then convert back to lists
         existing_images = set(group['images'])
         existing_jsons = set(group['jsons'])
@@ -445,6 +478,8 @@ class GroupMerger:
                 'images': decision['r_id_1_images'],
                 'jsons': decision['r_id_1_jsons'],
                 'bboxes': decision['r_id_1_bboxes'],
+                'group_timestamp': decision.get('r_id_1_timestamp'),  # ADD THIS LINE
+                'uuid': decision.get('r_id_1_uuid', ''),  # ADD THIS LINE
                 'is_merged': False
             }
         
@@ -454,9 +489,11 @@ class GroupMerger:
                 'images': decision['r_id_2_images'],
                 'jsons': decision['r_id_2_jsons'],
                 'bboxes': decision['r_id_2_bboxes'],
+                'group_timestamp': decision.get('r_id_2_timestamp'),  # ADD THIS LINE
+                'uuid': decision.get('r_id_2_uuid', ''),  # ADD THIS LINE
                 'is_merged': False
             }
-    
+        
     def _generate_merged_id(self) -> str:
         """Generate a unique ID for a merged group."""
         import random
@@ -704,10 +741,14 @@ class ThirdStageSecondaryMatcher:
                 'r_id_1_images': [self._convert_to_gcs_path(img) for img in group1['images']],
                 'r_id_1_jsons': [self._convert_to_gcs_path(json_path) for json_path in group1['jsons']],
                 'r_id_1_bboxes': group1.get('bboxes', []),
+                'r_id_1_timestamp': group1.get('group_timestamp'),  # ADD THIS LINE
+                'r_id_1_uuid': group1.get('uuid', '') or ','.join(group1.get('uuids', [])),  # ADD THIS LINE
                 'r_id_2': r_id_2,
                 'r_id_2_images': [self._convert_to_gcs_path(img) for img in group2['images']],
                 'r_id_2_jsons': [self._convert_to_gcs_path(json_path) for json_path in group2['jsons']],
                 'r_id_2_bboxes': group2.get('bboxes', []),
+                'r_id_2_timestamp': group2.get('group_timestamp'),  # ADD THIS LINE
+                'r_id_2_uuid': group2.get('uuid', '') or ','.join(group2.get('uuids', [])),  # ADD THIS LINE
                 'similarity_score': second_match.get('similarity_score', 0.0),
                 'created_at': datetime.utcnow().isoformat() + 'Z'
             }
@@ -717,7 +758,6 @@ class ThirdStageSecondaryMatcher:
         except Exception as e:
             self.logger.error(f"Error creating match data: {e}")
             return None
-
 
 def setup_logging(log_level: str = "INFO") -> logging.Logger:
     """Setup logging configuration."""
@@ -759,7 +799,7 @@ Examples:
     
     parser.add_argument(
         '--labeled-json',
-        default="/reidentification/silver/Groups_Association_Phase_cleaned/lable_studio_exports/LS_185882_ACCEPTED_2025-09-18_14-11_9Tasks.json",
+        default="/reidentification/silver/Groups_Association_Phase_cleaned/lable_studio_exports/LS_185882_ACCEPTED_2025-09-26_11-15_1Tasks.json",
         help='GCS path to the labeled JSON file containing match pairs with bboxes'
     )
     

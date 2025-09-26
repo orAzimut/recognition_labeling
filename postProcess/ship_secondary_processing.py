@@ -490,13 +490,17 @@ class LabelStudioProcessor:
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
     
     def extract_clean_groups(self, labeled_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Extract clean groups from labeled data, creating separate groups for each class (MainGroup, OutGroup1, etc.)."""
+    
         clean_groups = []
         
         for group in labeled_data:
             try:
                 original_r_id = group.get('r_id')
                 images_data = group.get('images_data', [])
+                
+                # Extract timestamp information - ADD THESE LINES
+                group_timestamp = group.get('group_timestamp')
+                uuid = group.get('uuid', '')
                 
                 if not images_data:
                     self.logger.warning(f"Group {original_r_id} has no images_data, skipping")
@@ -550,12 +554,15 @@ class LabelStudioProcessor:
                             'jsons': class_data['jsons'],
                             'original_group': group,  # Keep reference to original for metadata
                             'class_name': class_name,  # Track which class this group represents
-                            'original_r_id': original_r_id  # Track original r_id for reference
+                            'original_r_id': original_r_id,  # Track original r_id for reference
+                            'group_timestamp': group_timestamp,  # ADD THIS LINE
+                            'uuid': uuid,  # ADD THIS LINE
                         }
                         clean_groups.append(clean_group)
                         
                         self.logger.info(f"Extracted clean group {new_r_id} ({class_name}): "
-                                       f"{len(class_data['images'])} images, {len(class_data['jsons'])} JSONs")
+                                    f"{len(class_data['images'])} images, {len(class_data['jsons'])} JSONs, "
+                                    f"timestamp: {group_timestamp}")
                 
                 if not groups_by_class:
                     self.logger.warning(f"Group {original_r_id} has no clean images after processing")
@@ -566,7 +573,7 @@ class LabelStudioProcessor:
         
         self.logger.info(f"Extracted {len(clean_groups)} clean groups from {len(labeled_data)} labeled tasks")
         return clean_groups
-    
+
     
     def _corresponding_image_path(self, json_path: str) -> str:
         """Convert JSON metadata path to corresponding image path."""
@@ -775,7 +782,7 @@ class SecondaryMatcher:
         return False
     
     def _create_match_data(self, group1: Dict, second_match: Dict, all_groups: List[Dict]) -> Optional[Dict]:
-        """Create match pair data structure."""
+
         try:
             r_id_1 = group1['r_id']
             r_id_2 = second_match['vessel_id']
@@ -800,10 +807,14 @@ class SecondaryMatcher:
                 'r_id_1_images': group1['images'],
                 'r_id_1_jsons': group1['jsons'],
                 'r_id_1_bboxes': r_id_1_bboxes,
+                'r_id_1_timestamp': group1.get('group_timestamp'),  # ADD THIS LINE
+                'r_id_1_uuid': group1.get('uuid', ''),  # ADD THIS LINE
                 'r_id_2': r_id_2,
                 'r_id_2_images': group2['images'],
                 'r_id_2_jsons': group2['jsons'],
                 'r_id_2_bboxes': r_id_2_bboxes,
+                'r_id_2_timestamp': group2.get('group_timestamp'),  # ADD THIS LINE
+                'r_id_2_uuid': group2.get('uuid', ''),  # ADD THIS LINE
                 'similarity_score': second_match.get('similarity_score', 0.0),
                 'created_at': datetime.utcnow().isoformat() + 'Z'
             }
@@ -880,8 +891,7 @@ def parse_arguments() -> argparse.Namespace:
 Examples:
   python ship_secondary_processing.py \\
     --bucket azimut_data \\
-    --labeled-json "/reidentification/silver/Initial_groups_phase_cleaned/label_studio_exports/2025-09-04_15-36_7Tasks.json"
-
+    --labeled-json "/reidentification/silver/Initial_groups_phase_cleaned/label_studio_exports/2025-09-19_18-06_222Tasks.json"
   python ship_secondary_processing.py \\
     --bucket azimut_data \\
     --labeled-json "/path/to/labeled_export.json" \\
@@ -898,7 +908,7 @@ Examples:
     
     parser.add_argument(
         '--labeled-json',
-        default="/reidentification/silver/Initial_groups_phase_cleaned/lable_studio_exports/2025-09-18_09-19_677Tasks.json",
+        default="/reidentification/silver/Initial_groups_phase_cleaned/lable_studio_exports/2025-09-26_11-01_18Tasks.json",
         help='GCS path to Label Studio export JSON file'
     )
 
