@@ -57,7 +57,7 @@ YOLO_IOU_THRESHOLD = 0.45  # Adjust as needed
 API_KEY = 'b123dc58-4c18-4b0c-9f04-82a06be63ff9'
 PORT_LAT = 32.8154
 PORT_LON = 35.0043
-SEARCH_RADIUS = 10  # km
+SEARCH_RADIUS = 5  # km
 
 # Flask Configuration
 FLASK_PORT = 5000
@@ -1162,7 +1162,7 @@ class ShipspottingScraper:
         return all_photo_ids[:MAX_PHOTOS_PER_IMO]
     
     def parse_photo_page(self, html: str, photo_id: str) -> Optional[Dict]:
-        """Parse photo page to extract metadata"""
+        """Parse photo page to extract metadata including capture date"""
         soup = BeautifulSoup(html, "lxml")
         og = soup.find("meta", {"property": "og:image"})
         if not og:
@@ -1182,6 +1182,19 @@ class ShipspottingScraper:
             if len(vessel_type) > 50:
                 vessel_type = vessel_type[:50].strip()
         
+        # Extract captured date
+        captured_date_formatted = "19000101"  # Default to Jan 1, 1900
+        captured_match = re.search(r"Captured\s*:\s*([A-Za-z]+\s+\d{1,2},\s+\d{4})", full, re.I)
+        if captured_match:
+            try:
+                # Parse the date (e.g., "Sep 20, 2025")
+                date_str = captured_match.group(1)
+                parsed_date = datetime.strptime(date_str, "%b %d, %Y")
+                captured_date_formatted = parsed_date.strftime("%Y%m%d")
+            except Exception as e:
+                logger.debug(f"Failed to parse captured date '{date_str}': {e}")
+                # Keep default date
+        
         imo_match = self.imo_regex.search(full)
         mmsi_match = self.mmsi_regex.search(full)
         
@@ -1193,6 +1206,7 @@ class ShipspottingScraper:
             "mmsi": mmsi_match.group(1) if mmsi_match else None,
             "vessel_type": vessel_type,
             "image_url": img_url,
+            "captured_date": captured_date_formatted,  # Add captured date to metadata
         }
     
     def process_and_upload_detections(self, imo: str, local_imo_path: Path, vessel_details: Dict, gcs_manager):
@@ -1278,11 +1292,14 @@ class ShipspottingScraper:
                 continue
             
             try:
-                # Save image
-                jpg_file = local_imo_path / f"shipspotting_{photo_id}.jpg"
+                # Get captured date from metadata
+                captured_date = meta.get("captured_date", "19000101")
+                
+                # Save image with date in filename
+                jpg_file = local_imo_path / f"{photo_id}_{captured_date}.jpg"
                 Image.open(BytesIO(img_bytes)).convert("RGB").save(jpg_file, quality=92)
                 success_count += 1
-                logger.info(f"✓ Downloaded {jpg_file.name} for IMO {imo}")
+                logger.info(f" Downloaded {jpg_file.name} for IMO {imo}")
             except Exception as e:
                 logger.error(f"Failed to save photo {photo_id}: {e}")
             
