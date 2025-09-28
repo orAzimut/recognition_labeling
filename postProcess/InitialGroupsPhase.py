@@ -362,7 +362,7 @@ def parse_arguments() -> argparse.Namespace:
         epilog='''Examples:\n  python ship_uuid_uploader.py \\\n    --bucket azimut_data \\\n    --gcs-path "/reidentification/bronze/raw_crops/haifa/azimut-haifa" \\\n    --num-uuids 200\n'''
     )
     p.add_argument('--bucket', default='azimut_data', help='Input GCS bucket')
-    p.add_argument('--gcs-path', default='/reidentification/bronze/raw_crops/haifa/azimut-haifa/2025/09/25',
+    p.add_argument('--gcs-path', default='/reidentification/bronze/raw_crops/haifa/azimut-haifa/2025/09/27',
                    help='Base GCS path to scan for UUIDs (legacy/mission/custom supported)')
     p.add_argument('--num-uuids', type=int, default=400, help='Max UUIDs to process this run')
     p.add_argument('--output-bucket', default=None, help='Output GCS bucket (default: same as --bucket)')

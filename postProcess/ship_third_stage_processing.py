@@ -737,6 +737,7 @@ class ThirdStageSecondaryMatcher:
                 return None
             
             match_data = {
+                
                 'r_id_1': r_id_1,
                 'r_id_1_images': [self._convert_to_gcs_path(img) for img in group1['images']],
                 'r_id_1_jsons': [self._convert_to_gcs_path(json_path) for json_path in group1['jsons']],

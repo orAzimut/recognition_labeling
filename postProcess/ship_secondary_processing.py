@@ -908,7 +908,7 @@ Examples:
     
     parser.add_argument(
         '--labeled-json',
-        default="/reidentification/silver/Initial_groups_phase_cleaned/lable_studio_exports/2025-09-26_11-01_18Tasks.json",
+        default="/reidentification/silver/Initial_groups_phase_cleaned/lable_studio_exports/2025-09-27_16-42_679Tasks.json",
         help='GCS path to Label Studio export JSON file'
     )
 

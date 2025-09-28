@@ -566,12 +566,31 @@ HTML_TEMPLATE = """
         <div class="header">
             <a href="/" class="back-button">← Back to Gallery</a>
             <h1>🚢 {{ vessel_name }}</h1>
-            <p>IMO {{ imo }} • {{ vessel_type }} • {{ photos|length }} photos available</p>
+            <p>IMO {{ imo }} • {{ vessel_type }} • <span id="detailPhotoCount">{{ photos|length }}</span> photos available</p>
         </div>
-        
-        <div class="detail-gallery">
+
+        <div class="search-section">
+            <div class="search-controls">
+                <div class="date-range-container">
+                    <label>📅 Filter by capture date:</label>
+                    <input type="date" class="date-input" id="detailFromDate" onchange="filterDetailGallery()">
+                    <label>to</label>
+                    <input type="date" class="date-input" id="detailToDate" onchange="filterDetailGallery()">
+                    <button class="clear-dates-btn" onclick="clearDetailDateFilters()">Clear</button>
+                </div>
+            </div>
+            <div class="search-hint">
+                <span id="detailFilterInfo">Showing all {{ photos|length }} photos</span>
+            </div>
+        </div>
+
+        <div class="no-results" id="detailNoResults" style="display: none;">
+            No photos found in the selected date range.
+        </div>
+
+        <div class="detail-gallery" id="detailGallery">
             {% for photo in photos %}
-            <div class="detail-photo">
+            <div class="detail-photo" data-photo-name="{{ photo }}">
                 <img src="/image/{{ imo }}/{{ photo }}" alt="{{ photo }}" 
                      onclick="openModal('/image/{{ imo }}/{{ photo }}')">
                 <div class="photo-name">{{ photo }}</div>
@@ -617,8 +636,20 @@ HTML_TEMPLATE = """
             
             // Set max date to today for date inputs
             const today = new Date().toISOString().split('T')[0];
-            document.getElementById('fromDate').setAttribute('max', today);
-            document.getElementById('toDate').setAttribute('max', today);
+            const fromDate = document.getElementById('fromDate');
+            const toDate = document.getElementById('toDate');
+            if (fromDate && toDate) {
+                fromDate.setAttribute('max', today);
+                toDate.setAttribute('max', today);
+            }
+            
+            // Set max date to today for detail date inputs if they exist
+            const detailFromDate = document.getElementById('detailFromDate');
+            const detailToDate = document.getElementById('detailToDate');
+            if (detailFromDate && detailToDate) {
+                detailFromDate.setAttribute('max', today);
+                detailToDate.setAttribute('max', today);
+            }
             
             // Apply initial filter to show only current bay vessels (or all if date filter present)
             filterGallery();
@@ -634,11 +665,14 @@ HTML_TEMPLATE = """
             const searchInput = document.getElementById('searchInput');
             const fromDate = document.getElementById('fromDate').value;
             const toDate = document.getElementById('toDate').value;
-            const filter = searchInput.value.toLowerCase().trim();
+            const filter = searchInput ? searchInput.value.toLowerCase().trim() : '';
             const cards = document.querySelectorAll('.imo-card');
             const noResults = document.getElementById('noResults');
             const activeFilters = document.getElementById('activeFilters');
             const gallery = document.getElementById('gallery');
+            
+            // Only run if we're on the main page
+            if (!gallery) return;
             
             // Get current bay IMOs from data attribute
             const currentBayImos = JSON.parse(gallery.dataset.currentBayImos || '[]');
@@ -749,6 +783,85 @@ HTML_TEMPLATE = """
                 }
             } else {
                 activeFilters.classList.remove('show');
+            }
+        }
+        
+        function clearDetailDateFilters() {
+            document.getElementById('detailFromDate').value = '';
+            document.getElementById('detailToDate').value = '';
+            filterDetailGallery();
+        }
+
+        function filterDetailGallery() {
+            const detailGallery = document.getElementById('detailGallery');
+            if (!detailGallery) return; // Not on detail page
+            
+            const fromDate = document.getElementById('detailFromDate').value;
+            const toDate = document.getElementById('detailToDate').value;
+            const photos = document.querySelectorAll('.detail-photo');
+            const noResults = document.getElementById('detailNoResults');
+            const filterInfo = document.getElementById('detailFilterInfo');
+            const photoCount = document.getElementById('detailPhotoCount');
+            
+            // Parse dates if provided
+            const fromTimestamp = fromDate ? parseInt(fromDate.replace(/-/g, '')) : null;
+            const toTimestamp = toDate ? parseInt(toDate.replace(/-/g, '')) : null;
+            
+            let visibleCount = 0;
+            const totalPhotos = photos.length;
+            
+            photos.forEach(photo => {
+                const photoName = photo.dataset.photoName;
+                let photoDate = null;
+                
+                // Extract date from filename
+                if (photoName) {
+                    // Handle new format: {photo_id}_{YYYYMMDD}.jpg
+                    if (photoName.includes('_') && !photoName.startsWith('shipspotting_')) {
+                        const parts = photoName.split('_');
+                        if (parts.length >= 2) {
+                            const datePart = parts[parts.length - 1].split('.')[0];
+                            if (datePart.length === 8 && /^\d{8}$/.test(datePart)) {
+                                photoDate = parseInt(datePart);
+                            }
+                        }
+                    }
+                    // Old format or no date - treat as very old
+                    if (!photoDate) {
+                        photoDate = 19000101;
+                    }
+                }
+                
+                // Apply date filter
+                let shouldShow = true;
+                if (fromTimestamp || toTimestamp) {
+                    const afterFrom = !fromTimestamp || photoDate >= fromTimestamp;
+                    const beforeTo = !toTimestamp || photoDate <= toTimestamp;
+                    shouldShow = afterFrom && beforeTo;
+                }
+                
+                // Show/hide photo
+                if (shouldShow) {
+                    photo.style.display = '';
+                    visibleCount++;
+                } else {
+                    photo.style.display = 'none';
+                }
+            });
+            
+            // Update counts and messages
+            photoCount.textContent = visibleCount;
+            
+            if (visibleCount === 0 && (fromDate || toDate)) {
+                noResults.style.display = 'block';
+                filterInfo.textContent = 'No photos in selected range';
+            } else {
+                noResults.style.display = 'none';
+                if (fromDate || toDate) {
+                    filterInfo.textContent = `Showing ${visibleCount} of ${totalPhotos} photos (filtered by date)`;
+                } else {
+                    filterInfo.textContent = `Showing all ${totalPhotos} photos`;
+                }
             }
         }
         
@@ -1677,7 +1790,7 @@ class GallerySynchronizer:
 app = Flask(__name__)
 synchronizer = GallerySynchronizer()
 def get_imo_photos() -> Dict:
-    """Scan gallery directory and group photos by IMO folder - ENHANCED with timestamps"""
+    """Scan gallery directory and group photos by IMO folder - ENHANCED with timestamps and date sorting"""
     imo_data = {}
     gallery_path = Path(LOCAL_GALLERY_PATH)
     
@@ -1698,7 +1811,24 @@ def get_imo_photos() -> Dict:
                     photos.append(file.name)
             
             if photos:
-                photos.sort()
+                # Sort photos by captured date (newest first)
+                def get_photo_date(filename):
+                    """Extract date from filename, return for sorting (newest first)"""
+                    try:
+                        # Handle new format: {photo_id}_{YYYYMMDD}.jpg
+                        if '_' in filename and not filename.startswith('shipspotting_'):
+                            parts = filename.rsplit('_', 1)
+                            if len(parts) == 2:
+                                date_part = parts[1].split('.')[0]
+                                if len(date_part) == 8 and date_part.isdigit():
+                                    return date_part
+                        # Handle old format: shipspotting_{photo_id}.jpg - return old date
+                        return "19000101"
+                    except:
+                        return "19000101"
+                
+                # Sort by date descending (newest first)
+                photos.sort(key=lambda x: get_photo_date(x), reverse=True)
                 
                 # Try to get vessel name, type, and sync timestamps from metadata
                 vessel_name = "Unknown Vessel"
