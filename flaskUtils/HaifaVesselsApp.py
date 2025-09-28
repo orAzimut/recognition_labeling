@@ -1499,6 +1499,7 @@ class GCSManager:
     def __init__(self):
         self.client = None
         self.bucket = None
+        self.scraper = ShipspottingScraper()
         self.initialize_client()
         
     def initialize_client(self):
@@ -1540,21 +1541,79 @@ class GCSManager:
         success_count = 0
         for idx, blob in enumerate(image_blobs, 1):
             try:
-                # Keep original filename structure
-                filename = os.path.basename(blob.name)
-                local_file_path = local_imo_path / filename
+                # Get original filename
+                original_filename = os.path.basename(blob.name)
+                filename_without_ext = os.path.splitext(original_filename)[0]
+                
+                # Extract photo ID with multiple pattern matching
+                photo_id = None
+                
+                # Pattern 1: Pure numeric (12345.jpg)
+                if filename_without_ext.isdigit():
+                    photo_id = filename_without_ext
+                # Pattern 2: shipspotting_12345
+                elif filename_without_ext.startswith('shipspotting_'):
+                    parts = filename_without_ext.replace('shipspotting_', '')
+                    if parts.isdigit():
+                        photo_id = parts
+                # Pattern 3: Has underscore, take first numeric part
+                elif '_' in filename_without_ext:
+                    parts = filename_without_ext.split('_')
+                    if parts[0].isdigit():
+                        photo_id = parts[0]
+                
+                # Initialize captured date with default
+                captured_date = "19000101"
+                
+                # Try to fetch capture date from ShipSpotting if we have a photo ID
+                if photo_id:
+                    try:
+                        logger.info(f"Fetching capture date for photo ID {photo_id}...")
+                        html = self.scraper.fetch(SHIPSPOTTING_PHOTO.format(pid=photo_id))
+                        
+                        if html:
+                            meta = self.scraper.parse_photo_page(html, photo_id)
+                            if meta:
+                                # Get the captured_date from metadata, use default if not present
+                                captured_date = meta.get("captured_date", "19000101")
+                                if captured_date != "19000101":
+                                    logger.info(f"Found capture date {captured_date} for photo {photo_id}")
+                            else:
+                                logger.debug(f"Could not parse metadata for photo {photo_id}, using default date")
+                        else:
+                            logger.debug(f"Could not fetch page for photo {photo_id}, using default date")
+                            
+                        time.sleep(0.2)  # Small delay to avoid overwhelming ShipSpotting
+                        
+                    except Exception as e:
+                        logger.debug(f"Error fetching date for photo {photo_id}: {e}, using default date")
+                        # Keep the default date
+                
+                # Construct local filename
+                if photo_id:
+                    # Always use photo_id_date format when we have a photo ID
+                    local_filename = f"{photo_id}_{captured_date}.jpg"
+                else:
+                    # Keep original filename if we couldn't extract photo ID
+                    local_filename = original_filename
+                
+                local_file_path = local_imo_path / local_filename
                 
                 # Download the file
                 blob.download_to_filename(str(local_file_path))
                 success_count += 1
+                
+                if captured_date != "19000101":
+                    logger.info(f"Downloaded {blob.name} as {local_filename} (with date)")
+                else:
+                    logger.info(f"Downloaded {blob.name} as {local_filename} (default date)")
                 
             except Exception as e:
                 logger.error(f"Failed to download {blob.name}: {str(e)}")
         
         if success_count > 0:
             # Update metadata JSON with the new list format
-            scraper = ShipspottingScraper()
-            scraper.update_imo_metadata(imo_number, local_imo_path, vessel_details, success_count, "gcs")
+            self.scraper.update_imo_metadata(imo_number, local_imo_path, vessel_details, success_count, "gcs")
             logger.info(f"IMO {imo_number}: Downloaded {success_count}/{len(image_blobs)} photos from GCS")
         
         return success_count
