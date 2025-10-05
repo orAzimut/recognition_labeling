@@ -6,6 +6,7 @@ Groups Association Phase export
 - Keep ONLY review-accepted tasks that are NOT already in the processed registry.
 - Extract `same_vessel` from the accepted annotation.
 - Preserve your original output JSON schema & ledger logic.
+- NEW: Automatically triggers ship_third_stage_processing.py after successful export.
 
 Outputs a timestamped JSON to:
   gs://{GCS_BUCKET_NAME}/{GCS_OUTPUT_PREFIX}/LS_{PROJECT_ID}_ACCEPTED_<ts>_<N>Tasks.json
@@ -15,8 +16,10 @@ Updates/creates a processed-IDs registry at:
 """
 
 import os
+import sys
 import json
 import time
+import subprocess
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone
 
@@ -40,7 +43,7 @@ from google.api_core.exceptions import NotFound
 # =======================================
 BASE_URL   = "https://app.heartex.com"
 PROJECT_ID = 185882
-API_TOKEN  = "e3dd5c79ff9086a6b8769a35905cb249448cf3e9"  # <-- put your token
+API_TOKEN  = "5b62611f13b4beb4d85c4b48e2cb10651a8442e9"  # <-- put your token
 
 # Optional: if you have a saved LS View that pre-filters tasks (e.g. to 'reviewed only')
 VIEW_ID: Optional[int] = None  # e.g., 123456 or None
@@ -58,6 +61,11 @@ NORMALIZE_GS_SCHEME = False
 
 # Polling interval for snapshot completion
 SNAPSHOT_POLL_SECS = 1.8
+
+# Third Stage Processing Configuration
+THIRD_STAGE_SCRIPT_PATH = r"C:\Users\OrGil.AzureAD\OneDrive - AMPC\Desktop\Azimut.ai\recognition_labeling\postProcess\ship_third_stage_processing.py"
+RECOGNITION_SERVICE_URL = "http://localhost:8080"  # Ship-Recognition-Service URL
+AUTO_TRIGGER_THIRD_STAGE = True  # Set to False to disable auto-triggering
 
 # ---------------- Acceptance helpers ----------------
 def _low(x): 
@@ -248,6 +256,64 @@ def fetch_tasks_via_snapshot(ls: LabelStudio, project_id: int, view_id: Optional
 
     return payload
 
+# ---------------- Third Stage Trigger ----------------
+def trigger_third_stage_processing(labeled_json_path: str) -> bool:
+    """
+    Trigger the third stage processing script with the newly created export.
+    
+    Args:
+        labeled_json_path: Path to the exported JSON file (with leading slash)
+    
+    Returns:
+        True if third stage processing succeeded, False otherwise
+    """
+    if not labeled_json_path:
+        print("WARNING: No export file to process")
+        return False
+    
+    print("\n" + "=" * 60)
+    print("TRIGGERING THIRD STAGE PROCESSING")
+    print("=" * 60)
+    print(f"Input file: {labeled_json_path}")
+    print(f"Bucket: {GCS_BUCKET_NAME}")
+    print(f"Service URL: {RECOGNITION_SERVICE_URL}")
+    print()
+    
+    try:
+        # Build command
+        cmd = [
+            sys.executable,  # Use the same Python interpreter
+            THIRD_STAGE_SCRIPT_PATH,
+            "--bucket", GCS_BUCKET_NAME,
+            "--labeled-json", labeled_json_path,
+            "--service-url", RECOGNITION_SERVICE_URL,
+            "--credentials", GCS_CREDENTIALS_PATH,
+        ]
+        
+        print(f"Running command: {' '.join(cmd)}\n")
+        
+        # Run the third stage processing script
+        result = subprocess.run(
+            cmd,
+            check=True,
+            capture_output=False,  # Show output in real-time
+            text=True
+        )
+        
+        print("\nThird stage processing completed successfully")
+        return True
+        
+    except subprocess.CalledProcessError as e:
+        print(f"\nERROR: Third stage processing failed with exit code {e.returncode}")
+        return False
+    except FileNotFoundError:
+        print(f"\nERROR: Could not find third stage processing script: {THIRD_STAGE_SCRIPT_PATH}")
+        print("Please ensure 'ship_third_stage_processing.py' is accessible at the configured path")
+        return False
+    except Exception as e:
+        print(f"\nERROR: Unexpected error triggering third stage processing: {e}")
+        return False
+
 # ---------------- Main ----------------
 def main():
     # Load processed tasks registry
@@ -353,9 +419,12 @@ def main():
     filename = f"LS_{PROJECT_ID}_ACCEPTED_{ts}_{len(outputs)}Tasks.json"
 
     # Save export if any NEW accepted tasks
+    exported_file_path = None
     if outputs:
         gs_path = save_json_to_gcs(outputs, filename)
         print(f"✅ Saved {len(outputs)} accepted tasks to: {gs_path}")
+        # Extract path for triggering (remove gs://bucket/ prefix, keep just the path)
+        exported_file_path = f"/{GCS_OUTPUT_PREFIX}/{filename}"
     else:
         print("ℹ️ No new accepted tasks to export (all processed / none accepted).")
 
@@ -373,6 +442,32 @@ def main():
     else:
         print(f"📝 Processed registry timestamp updated (no new IDs) → {reg_path}")
         print(f"🧮 Registry total_count: {len(merged_ids)}")
+    
+    return exported_file_path  # Return the path for triggering next stage
 
 if __name__ == "__main__":
-    main()
+    # Run the main export script
+    exported_file = main()
+    
+    # If an export was created and auto-trigger is enabled, trigger third stage processing
+    if exported_file and AUTO_TRIGGER_THIRD_STAGE:
+        print("\n" + "=" * 60)
+        print("Stage 2 Complete - Starting Stage 3")
+        print("=" * 60)
+        
+        # Trigger third stage processing with the newly created file
+        success = trigger_third_stage_processing(exported_file)
+        
+        if success:
+            print("\n🎉 Pipeline completed successfully!")
+            sys.exit(0)
+        else:
+            print("\n⚠️  Pipeline completed with errors in Stage 3")
+            sys.exit(1)
+    elif exported_file and not AUTO_TRIGGER_THIRD_STAGE:
+        print(f"\nAuto-trigger disabled. To process manually, run:")
+        print(f"python {THIRD_STAGE_SCRIPT_PATH} --bucket {GCS_BUCKET_NAME} --labeled-json {exported_file}")
+        sys.exit(0)
+    else:
+        print("\nNo new data to process - pipeline stopped at Stage 2")
+        sys.exit(0)

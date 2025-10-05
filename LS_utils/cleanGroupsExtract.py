@@ -4,6 +4,8 @@ Export ONLY review-accepted (>=1) tasks that have NOT been processed before,
 using Label Studio SDK v2 snapshot/export for reliability, and preserving the
 output structure/logic from the original script.
 
+NEW: Automatically triggers ship_secondary_processing.py after successful export.
+
 - Maintains a ledger in GCS: processed_tasksID_Initial.json
 - Skips duplicates on every run
 - Extracts per-image Trash flags + bboxes for <Image valueList="$images">
@@ -16,6 +18,8 @@ import os
 import json
 import time
 import re
+import sys
+import subprocess
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, timezone
 from collections import Counter
@@ -38,11 +42,11 @@ except Exception:
 # =========================
 # Label Studio
 LS_URL = "https://app.heartex.com"
-LS_API_KEY = "e3dd5c79ff9086a6b8769a35905cb249448cf3e9"  # <-- replace
+LS_API_KEY = "5b62611f13b4beb4d85c4b48e2cb10651a8442e9"  # <-- replace
 PROJECT_ID = 186048
 
 # If you have a saved View in LS that already filters to reviewed/accepted,
-# set VIEW_ID; otherwise leave as None and we’ll filter client-side.
+# set VIEW_ID; otherwise leave as None and we'll filter client-side.
 VIEW_ID: Optional[int] = None  # e.g., 123456 or None
 
 # Labeling interface control names / values
@@ -68,6 +72,11 @@ UPLOAD_EMPTY_EXPORT = False
 
 # Review acceptance guard (client-side, resilient to older payloads)
 ACCEPTED_LAST_ACTIONS = {"accepted", "fixed_and_accepted"}
+
+# Secondary Processing Configuration
+SECONDARY_SCRIPT_PATH = "postProcess/ship_secondary_processing.py"  # Path to the secondary processing script
+RECOGNITION_SERVICE_URL = "http://localhost:8080"  # Ship-Recognition-Service URL
+AUTO_TRIGGER_SECONDARY = True  # Set to False to disable auto-triggering
 
 
 # =========================
@@ -450,6 +459,64 @@ def fetch_tasks_via_snapshot(ls: LabelStudio, project_id: int, view_id: Optional
     return payload
 
 
+def trigger_secondary_processing(labeled_json_path: str) -> bool:
+    """
+    Trigger the secondary processing script with the newly created export.
+    
+    Args:
+        labeled_json_path: Path to the exported JSON file (with leading slash)
+    
+    Returns:
+        True if secondary processing succeeded, False otherwise
+    """
+    if not labeled_json_path:
+        print("WARNING: No export file to process")
+        return False
+    
+    print("\n" + "=" * 60)
+    print("TRIGGERING SECONDARY PROCESSING")
+    print("=" * 60)
+    print(f"Input file: {labeled_json_path}")
+    print(f"Bucket: {GCS_BUCKET}")
+    print(f"Service URL: {RECOGNITION_SERVICE_URL}")
+    print()
+    
+    try:
+        # Build command
+        cmd = [
+            sys.executable,  # Use the same Python interpreter
+            SECONDARY_SCRIPT_PATH,
+            "--bucket", GCS_BUCKET,
+            "--labeled-json", labeled_json_path,
+            "--service-url", RECOGNITION_SERVICE_URL,
+            "--credentials", GCS_CREDENTIALS_PATH,
+        ]
+        
+        print(f"Running command: {' '.join(cmd)}\n")
+        
+        # Run the secondary processing script
+        result = subprocess.run(
+            cmd,
+            check=True,
+            capture_output=False,  # Show output in real-time
+            text=True
+        )
+        
+        print("\nSecondary processing completed successfully")
+        return True
+        
+    except subprocess.CalledProcessError as e:
+        print(f"\nERROR: Secondary processing failed with exit code {e.returncode}")
+        return False
+    except FileNotFoundError:
+        print(f"\nERROR: Could not find secondary processing script: {SECONDARY_SCRIPT_PATH}")
+        print("Please ensure 'ship_secondary_processing.py' is in the same directory")
+        return False
+    except Exception as e:
+        print(f"\nERROR: Unexpected error triggering secondary processing: {e}")
+        return False
+
+
 def main():
     if not LS_API_KEY:
         raise SystemExit("Please set LS_API_KEY")
@@ -484,16 +551,20 @@ def main():
         }
         gcs_upload_json(GCS_BUCKET, PROCESSED_BLOB_PATH, new_ledger)
         print("No new tasks. Ledger timestamp updated. Exiting.")
-        return
+        return None  # Return None to indicate no export was created
 
     # 5) Process only NEW tasks with your original output logic
     print("🔄 Processing new tasks …")
     processed = process_tasks(new_tasks)
 
-    # 6) Upload the export JSON (timestamped), unless disabled for empty
+    # 6) Upload the export JSON (timestamped)
+    exported_file_path = None
     if processed or UPLOAD_EMPTY_EXPORT:
         filename = jerusalem_stamp_for_filename(len(processed))
-        gcs_upload_json(GCS_BUCKET, f"{GCS_EXPORT_PREFIX}/{filename}", processed)
+        full_path = f"{GCS_EXPORT_PREFIX}/{filename}"
+        gcs_upload_json(GCS_BUCKET, full_path, processed)
+        exported_file_path = f"/{full_path}"  # Add leading slash for the path
+        print(f"Exported to: {exported_file_path}")
     else:
         print("No processed items to export; skipping export upload.")
 
@@ -515,7 +586,33 @@ def main():
     print(f"  Trash selections : {total_trash}")
     print(f"  Bounding boxes   : {total_bboxes}")
     print("✅ Done.")
+    
+    return exported_file_path  # Return the path for triggering next script
 
 
 if __name__ == "__main__":
-    main()
+    # Run the main export script
+    exported_file = main()
+    
+    # If an export was created and auto-trigger is enabled, trigger secondary processing
+    if exported_file and AUTO_TRIGGER_SECONDARY:
+        print("\n" + "=" * 60)
+        print("Stage 1 Complete - Starting Stage 2")
+        print("=" * 60)
+        
+        # Trigger secondary processing with the newly created file
+        success = trigger_secondary_processing(exported_file)
+        
+        if success:
+            print("\n🎉 Pipeline completed successfully!")
+            sys.exit(0)
+        else:
+            print("\n⚠️  Pipeline completed with errors in Stage 2")
+            sys.exit(1)
+    elif exported_file and not AUTO_TRIGGER_SECONDARY:
+        print(f"\nAuto-trigger disabled. To process manually, run:")
+        print(f"python {SECONDARY_SCRIPT_PATH} --bucket {GCS_BUCKET} --labeled-json {exported_file}")
+        sys.exit(0)
+    else:
+        print("\nNo new data to process - pipeline stopped at Stage 1")
+        sys.exit(0)
