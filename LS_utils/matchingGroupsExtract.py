@@ -1,6 +1,22 @@
 #!/usr/bin/env python3
-import requests
+"""
+Groups Association Phase export
+--------------------------------
+- Pull tasks via Label Studio SDK v2 snapshot/export (robust & simple).
+- Keep ONLY review-accepted tasks that are NOT already in the processed registry.
+- Extract `same_vessel` from the accepted annotation.
+- Preserve your original output JSON schema & ledger logic.
+
+Outputs a timestamped JSON to:
+  gs://{GCS_BUCKET_NAME}/{GCS_OUTPUT_PREFIX}/LS_{PROJECT_ID}_ACCEPTED_<ts>_<N>Tasks.json
+
+Updates/creates a processed-IDs registry at:
+  gs://{GCS_BUCKET_NAME}/{PROCESSED_TASKS_BLOB}
+"""
+
+import os
 import json
+import time
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone
 
@@ -11,17 +27,23 @@ try:
 except Exception:
     TZ = None
 
+# --------- LS SDK v2 ----------
+from label_studio_sdk.client import LabelStudio  # <-- SDK 2.x
+
 # --------- GCS ----------
 from google.cloud import storage
 from google.oauth2 import service_account
 from google.api_core.exceptions import NotFound
 
 # =======================================
-# CONFIG — fill your token
+# CONFIG — fill your token / paths
 # =======================================
 BASE_URL   = "https://app.heartex.com"
 PROJECT_ID = 185882
-API_TOKEN  = "e3dd5c79ff9086a6b8769a35905cb249448cf3e9"
+API_TOKEN  = "e3dd5c79ff9086a6b8769a35905cb249448cf3e9"  # <-- put your token
+
+# Optional: if you have a saved LS View that pre-filters tasks (e.g. to 'reviewed only')
+VIEW_ID: Optional[int] = None  # e.g., 123456 or None
 
 # GCS destination for export files
 GCS_CREDENTIALS_PATH = r"C:\Users\OrGil.AzureAD\OneDrive - AMPC\Desktop\Azimut.ai\recognition_labeling\resources\credentials.json"
@@ -31,120 +53,58 @@ GCS_OUTPUT_PREFIX = "reidentification/silver/Groups_Association_Phase_cleaned/la
 # Processed tasks registry (read/write)
 PROCESSED_TASKS_BLOB = "reidentification/silver/Groups_Association_Phase_cleaned/processed_tasksID_match.json"
 
-# API behavior
-PAGE_SIZE  = 200
-TIMEOUT    = 60
-
 # If True, fix paths like "gs:/bucket/..." -> "gs://bucket/..."
 NORMALIZE_GS_SCHEME = False
 
-session = requests.Session()
-session.headers.update({
-    "Authorization": f"Token {API_TOKEN}",
-    "Content-Type": "application/json"
-})
+# Polling interval for snapshot completion
+SNAPSHOT_POLL_SECS = 1.8
 
-# ---------------- API helpers ----------------
-
-def list_tasks(project_id: int) -> List[Dict[str, Any]]:
-    tasks: List[Dict[str, Any]] = []
-    page = 1
-    while True:
-        params = {
-            "project": project_id,
-            "page": page,
-            "page_size": PAGE_SIZE,   # server may cap this (e.g., 100)
-            "fields": "all",
-            "resolve_uri": "false",
-        }
-        r = session.get(f"{BASE_URL}/api/tasks/", params=params, timeout=TIMEOUT)
-        if r.status_code in (404, 400):
-            # some deployments return 404/400 after the last valid page
-            break
-        r.raise_for_status()
-        obj = r.json()
-        if isinstance(obj, dict):
-            batch = obj.get("tasks") or obj.get("results") or obj.get("items") or []
-        elif isinstance(obj, list):
-            batch = obj
-        else:
-            batch = []
-        if not batch:
-            break
-        tasks.extend(batch)
-        page += 1
-    return tasks
-
-
-def list_annotations_for_task(task_id: int) -> List[Dict[str, Any]]:
-    """Fetch full annotations for a task. Return [] if task/annotations not found."""
-    try:
-        r = session.get(f"{BASE_URL}/api/tasks/{task_id}/annotations", timeout=TIMEOUT)
-        if r.status_code == 404:
-            # Some LS variants expose a flat /api/annotations?task=...
-            r = session.get(f"{BASE_URL}/api/annotations", params={"task": task_id}, timeout=TIMEOUT)
-        # If still 404 (task deleted or not visible) -> treat as no annotations
-        if r.status_code == 404:
-            return []
-        r.raise_for_status()
-    except requests.RequestException as e:
-        # Network/HTTP issues: treat as "no annotations" but log once
-        print(f"[Warn] list_annotations_for_task({task_id}) request error: {e}. Treating as no annotations.")
-        return []
-
-    data = r.json()
-    if isinstance(data, dict) and "results" in data:
-        return data["results"]
-    return data if isinstance(data, list) else []
-
+# ---------------- Acceptance helpers ----------------
+def _low(x): 
+    return str(x).strip().lower()
 
 def is_review_accepted(ann: Dict[str, Any]) -> bool:
     """Decide if an annotation is review-accepted across common LS variants."""
-    def low(x): return str(x).strip().lower()
     if ann.get("was_cancelled"):
         return False
     la = ann.get("last_action")
-    if la and low(la) in {"accepted", "fixed_and_accepted"}:
+    if la and _low(la) in {"accepted", "fixed_and_accepted"}:
         return True
-    for key in ("status", "review_result"):
+    for key in ("status", "review_result", "review_status"):
         val = ann.get(key)
-        if val and low(val) in {"accepted", "accepted_auto", "approved"}:
+        if val and _low(val) in {"accepted", "accepted_auto", "approved"}:
             return True
     if ann.get("approved") is True or ann.get("was_accepted") is True:
         return True
     for rv in ann.get("reviews") or []:
         if rv.get("accepted") is True:
             return True
-        if low(rv.get("result", "")) in {"accepted", "accepted_auto", "approved"}:
+        if _low(rv.get("result", "")) in {"accepted", "accepted_auto", "approved"}:
             return True
     return False
 
 def extract_same_vessel(ann: Dict[str, Any]) -> Optional[str]:
-    """Extract the same_vessel choice from annotation results."""
-    for item in ann.get("result", []):
-        if item.get("type") == "choices":
-            # Check if this is the same_vessel field (by from_name or other identifier)
-            # Different Label Studio configs might use different field names
-            from_name = item.get("from_name", "").lower()
-            to_name = item.get("to_name", "").lower()
-            
-            # Try to identify if this is the same_vessel choice
-            # Adjust these conditions based on your Label Studio configuration
-            if "same" in from_name or "vessel" in from_name or "same" in to_name or "vessel" in to_name:
-                choices = item.get("value", {}).get("choices", [])
-                if choices:
-                    return choices[0]  # Should be "Yes" or "No"
-            
-            # Fallback: if there's only one choices field, assume it's same_vessel
-            choices = item.get("value", {}).get("choices", [])
-            if choices and choices[0] in ["Yes", "No"]:
-                return choices[0]
-    
+    """Extract 'Yes'/'No' from the same_vessel choices (resilient to from_name naming)."""
+    for item in ann.get("result", []) or []:
+        if str(item.get("type")).lower() != "choices":
+            continue
+        from_name = str(item.get("from_name", "")).lower()
+        to_name   = str(item.get("to_name", "")).lower()
+        choices   = (item.get("value") or {}).get("choices", []) or []
+        if not choices:
+            continue
+        # Heuristics: any 'same'/'vessel' in field names, or direct Yes/No match
+        if ("same" in from_name or "vessel" in from_name or
+            "same" in to_name   or "vessel" in to_name):
+            return choices[0]
+        if choices[0] in ("Yes", "No"):
+            return choices[0]
     return None
 
+# ---------------- gs:// & bbox helpers ----------------
 def _norm_gs(paths: List[str]) -> List[str]:
     if not NORMALIZE_GS_SCHEME:
-        return paths
+        return paths or []
     fixed = []
     for p in paths or []:
         if isinstance(p, str) and p.startswith("gs:/") and not p.startswith("gs://"):
@@ -152,8 +112,6 @@ def _norm_gs(paths: List[str]) -> List[str]:
         else:
             fixed.append(p)
     return fixed
-
-# ---------------- BBox helpers ----------------
 
 def _coerce_bbox(bb: Any) -> Optional[List[float]]:
     """Ensure a single bbox is [x1, y1, x2, y2] floats."""
@@ -179,8 +137,7 @@ def _coerce_bboxes(bbs: Any) -> List[List[float]]:
             cleaned.append(c)
     return cleaned
 
-# --------------- GCS helpers -----------------
-
+# ---------------- GCS helpers ----------------
 def _gcs_client() -> storage.Client:
     creds = service_account.Credentials.from_service_account_file(GCS_CREDENTIALS_PATH)
     return storage.Client(credentials=creds)
@@ -231,15 +188,76 @@ def save_processed_registry(registry: Dict[str, Any]) -> str:
     )
     return f"gs://{GCS_BUCKET_NAME}/{PROCESSED_TASKS_BLOB}"
 
-# --------------- Main ---------------------
+# ---------------- LS snapshot/export ----------------
+def connect_label_studio() -> LabelStudio:
+    ls = LabelStudio(base_url=BASE_URL, api_key=API_TOKEN, timeout=30.0)
+    # quick sanity
+    _ = ls.projects.list(page_size=1)
+    return ls
 
+def fetch_tasks_via_snapshot(ls: LabelStudio, project_id: int, view_id: Optional[int]) -> List[Dict[str, Any]]:
+    """
+    Uses SDK v2 snapshot/export to download tasks as JSON (stable, no pagination).
+    If view_id is provided, LS applies it server-side; otherwise returns all tasks.
+    """
+    print(f"Creating export snapshot (project={project_id}, view_id={view_id}) …")
+    export = ls.projects.exports.create(
+        id=project_id,
+        title=f"groups_assoc_export_{int(time.time())}",
+        task_filter_options=({"view": int(view_id)} if view_id else {}),
+    )
+    export_pk = export.id
+
+    # Poll for completion
+    while True:
+        info = ls.projects.exports.get(id=project_id, export_pk=export_pk)
+        status = getattr(info, "status", None)
+        if status in ("completed", "failed"):
+            print(f"Export status: {status}")
+            if status == "failed":
+                details = getattr(info, "error", None) or getattr(info, "details", None)
+                raise RuntimeError(f"Export failed: {details or info}")
+            break
+        time.sleep(SNAPSHOT_POLL_SECS)
+
+    print("Downloading export JSON …")
+    downloaded = ls.projects.exports.download(id=project_id, export_pk=export_pk, export_type="JSON")
+
+    # Normalize to Python list[dict]
+    if isinstance(downloaded, (bytes, bytearray)):
+        payload = json.loads(downloaded.decode("utf-8"))
+    elif isinstance(downloaded, str) and os.path.exists(downloaded):
+        with open(downloaded, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    elif hasattr(downloaded, "read"):
+        payload = json.load(downloaded)
+    elif hasattr(downloaded, "__iter__") and not isinstance(downloaded, (str, bytes, bytearray)):
+        buf = bytearray()
+        for chunk in downloaded:
+            if not chunk:
+                continue
+            if isinstance(chunk, str):
+                chunk = chunk.encode("utf-8")
+            buf.extend(chunk)
+        payload = json.loads(buf.decode("utf-8"))
+    else:
+        raise TypeError(f"Unexpected download() return type: {type(downloaded)}")
+
+    if not isinstance(payload, list):
+        raise ValueError("Export payload is not a list of tasks")
+
+    return payload
+
+# ---------------- Main ----------------
 def main():
     # Load processed tasks registry
     registry = load_processed_registry()
     processed_ids: set[int] = set(registry.get("processed_tasksID", []))
+    print(f"Loaded registry with {len(processed_ids)} processed task IDs.")
 
-    # Pull tasks from Label Studio
-    tasks = list_tasks(PROJECT_ID)
+    # Connect + snapshot
+    ls = connect_label_studio()
+    tasks = fetch_tasks_via_snapshot(ls, PROJECT_ID, VIEW_ID)
 
     outputs: List[Dict[str, Any]] = []
     new_task_ids: List[int] = []
@@ -261,18 +279,17 @@ def main():
             already_processed_task_ids.append(tid)
             continue
 
-        anns = list_annotations_for_task(tid)
+        anns = t.get("annotations") or []
         if not anns:
             no_annotations_task_ids.append(tid)
             continue
 
-        # === ACCEPTED? ===
         accepted = [a for a in anns if is_review_accepted(a)]
         if not accepted:
             not_accepted_task_ids.append(tid)
             continue
 
-        # Get the most recent accepted annotation
+        # Most recent accepted annotation
         accepted.sort(
             key=lambda a: (
                 a.get("updated_at") or a.get("created_at") or "",
@@ -282,7 +299,6 @@ def main():
         )
         ann = accepted[0]
 
-        # Extract same_vessel from annotation
         same_vessel = extract_same_vessel(ann)
 
         # mark as processed and record accepted
@@ -290,13 +306,13 @@ def main():
         accepted_task_ids.append(tid)
 
         d = t.get("data", {}) or {}
-        
-        # Extract timestamps - ADD THESE LINES
+
+        # timestamps & uuids (your additions)
         r_id_1_timestamp = d.get("r_id_1_timestamp")
         r_id_2_timestamp = d.get("r_id_2_timestamp")
         r_id_1_uuid = d.get("r_id_1_uuid", "")
         r_id_2_uuid = d.get("r_id_2_uuid", "")
-        
+
         outputs.append({
             "task_id": tid,
             "annotation_id": ann.get("id"),
@@ -304,15 +320,15 @@ def main():
             "r_id_1_images": _norm_gs(d.get("r_id_1_images") or []),
             "r_id_1_jsons": _norm_gs(d.get("r_id_1_jsons") or []),
             "r_id_1_bboxes": _coerce_bboxes(d.get("r_id_1_bboxes") or []),
-            "r_id_1_timestamp": r_id_1_timestamp,  # ADD THIS LINE
-            "r_id_1_uuid": r_id_1_uuid,  # ADD THIS LINE
+            "r_id_1_timestamp": r_id_1_timestamp,
+            "r_id_1_uuid": r_id_1_uuid,
             "r_id_2": d.get("r_id_2"),
             "r_id_2_images": _norm_gs(d.get("r_id_2_images") or []),
             "r_id_2_jsons": _norm_gs(d.get("r_id_2_jsons") or []),
             "r_id_2_bboxes": _coerce_bboxes(d.get("r_id_2_bboxes") or []),
-            "r_id_2_timestamp": r_id_2_timestamp,  # ADD THIS LINE
-            "r_id_2_uuid": r_id_2_uuid,  # ADD THIS LINE
-            "same_vessel": same_vessel,  # Added same_vessel field
+            "r_id_2_timestamp": r_id_2_timestamp,
+            "r_id_2_uuid": r_id_2_uuid,
+            "same_vessel": same_vessel,
         })
 
     # ---- DEBUG REPORT ----
@@ -323,8 +339,7 @@ def main():
     already_processed_sorted = sorted(set(already_processed_task_ids))
 
     print("============== DEBUG / DIAGNOSTICS ==============")
-    print(f"Total tasks pulled from LS project: {len(all_task_ids_sorted)}")
-    print(f"Task IDs (ALL): {all_task_ids_sorted}")
+    print(f"Total tasks in snapshot: {len(all_task_ids_sorted)}")
     print(f"Accepted (NEW this run): {len(accepted_sorted_new)}")
     print(f"Accepted IDs (NEW): {accepted_sorted_new}")
     print(f"Not accepted: {len(not_accepted_sorted)}  | IDs: {not_accepted_sorted}")
@@ -337,14 +352,14 @@ def main():
     ts = now_local.strftime("%Y-%m-%d_%H-%M")
     filename = f"LS_{PROJECT_ID}_ACCEPTED_{ts}_{len(outputs)}Tasks.json"
 
-    # Save export if there are ANY accepted outputs
+    # Save export if any NEW accepted tasks
     if outputs:
         gs_path = save_json_to_gcs(outputs, filename)
         print(f"✅ Saved {len(outputs)} accepted tasks to: {gs_path}")
     else:
-        print("ℹ️ No new accepted tasks to export (possible reasons: all already processed, none accepted, or acceptance fields not detected).")
+        print("ℹ️ No new accepted tasks to export (all processed / none accepted).")
 
-    # Always bump last_updated; add new IDs if any; then save registry
+    # Update registry (always bump timestamp)
     merged_ids = sorted(set(registry.get("processed_tasksID", [])).union(new_task_ids))
     now_utc = datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
     registry["processed_tasksID"] = merged_ids

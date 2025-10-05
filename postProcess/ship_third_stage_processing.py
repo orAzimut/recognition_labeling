@@ -800,7 +800,7 @@ Examples:
     
     parser.add_argument(
         '--labeled-json',
-        default="/reidentification/silver/Groups_Association_Phase_cleaned/lable_studio_exports/LS_185882_ACCEPTED_2025-09-26_11-15_1Tasks.json",
+        default="/reidentification/silver/Groups_Association_Phase_cleaned/lable_studio_exports/LS_185882_ACCEPTED_2025-10-05_11-36_166Tasks.json",
         help='GCS path to the labeled JSON file containing match pairs with bboxes'
     )
     
