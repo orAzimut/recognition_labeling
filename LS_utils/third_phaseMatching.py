@@ -12,11 +12,15 @@ Outputs a timestamped JSON to:
 
 Updates/creates a processed-IDs registry at:
   gs://{GCS_BUCKET_NAME}/{PROCESSED_TASKS_BLOB}
+
+Authentication: Uses Application Default Credentials
+Run: gcloud auth application-default login
 """
 
 import os
 import json
 import time
+import argparse
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone
 
@@ -32,7 +36,6 @@ from label_studio_sdk.client import LabelStudio  # SDK 2.x
 
 # --------- GCS ----------
 from google.cloud import storage
-from google.oauth2 import service_account
 from google.api_core.exceptions import NotFound
 
 # =======================================
@@ -40,18 +43,18 @@ from google.api_core.exceptions import NotFound
 # =======================================
 BASE_URL   = "https://app.heartex.com"
 PROJECT_ID = 187693
-API_TOKEN  = "5b62611f13b4beb4d85c4b48e2cb10651a8442e9"  # <- keep secure
+API_TOKEN  = "34aefb3582706dd6ac6306d1b63095be6857de52"  # <- keep secure
 
 # Optional: set a saved LS View to reduce snapshot scope (e.g., 'reviewed only')
 VIEW_ID: Optional[int] = None  # e.g., 123456 or None
 
 # GCS destination for export files
-GCS_CREDENTIALS_PATH = r"C:\Users\OrGil.AzureAD\OneDrive - AMPC\Desktop\Azimut.ai\recognition_labeling\resources\credentials.json"
 GCS_BUCKET_NAME      = "azimut_data"
-GCS_OUTPUT_PREFIX    = "reidentification/silver/Third_Phase_Groups_Association/lable_studio_exports"
+GCS_OUTPUT_PREFIX    = "recognition/silver/Third_Phase_Groups_Association/lable_studio_exports"
 
-# Processed tasks registry (read/write)
-PROCESSED_TASKS_BLOB = "reidentification/silver/Third_Phase_Groups_Association/processed_tasksID_Phase3.json"
+# Processed tasks registry (global ledger)
+LEDGER_BUCKET = "azimut_data"
+GLOBAL_PROCESSED_BLOB_PATH = "reidentification/silver/Third_Phase_Groups_Association/processed_tasksID_Phase3.json"
 
 # If True, fix paths like "gs:/bucket/..." -> "gs://bucket/..."
 NORMALIZE_GS_SCHEME = False
@@ -139,6 +142,29 @@ def _coerce_bboxes(bbs: Any) -> List[List[float]]:
             cleaned.append(c)
     return cleaned
 
+
+def _extract_bucket(url: Any) -> Optional[str]:
+    if not isinstance(url, str):
+        return None
+    if not url.startswith("gs://"):
+        return None
+    rest = url[5:]
+    if not rest:
+        return None
+    return rest.split("/", 1)[0]
+
+
+def _entry_buckets(entry: Dict[str, Any], fallback_bucket: str) -> List[str]:
+    buckets: List[str] = []
+    for key in ("r_id_1_images", "r_id_1_jsons", "r_id_2_images", "r_id_2_jsons"):
+        for url in entry.get(key) or []:
+            b = _extract_bucket(url)
+            if b:
+                buckets.append(b)
+    if not buckets:
+        buckets = [fallback_bucket]
+    return sorted(set(buckets))
+
 def _warn_if_misaligned(task_id: Any, who: str,
                         imgs: List[str], jsons: List[str], bboxes: List[List[float]]):
     li, lj, lb = len(imgs), len(jsons), len(bboxes)
@@ -149,26 +175,26 @@ def _warn_if_misaligned(task_id: Any, who: str,
 
 # ---------------- GCS helpers ----------------
 def _gcs_client() -> storage.Client:
-    creds = service_account.Credentials.from_service_account_file(GCS_CREDENTIALS_PATH)
-    return storage.Client(credentials=creds)
+    """Connect to GCS using Application Default Credentials (your logged-in account)."""
+    return storage.Client()
 
-def save_json_to_gcs(data: Any, filename: str) -> str:
+def save_json_to_gcs(data: Any, filename: str, bucket_name: str) -> str:
     """Upload JSON to GCS (export area) and return gs:// path."""
     client = _gcs_client()
-    bucket = client.bucket(GCS_BUCKET_NAME)
+    bucket = client.bucket(bucket_name)
     blob_path = f"{GCS_OUTPUT_PREFIX}/{filename}"
     blob = bucket.blob(blob_path)
     blob.upload_from_string(
         json.dumps(data, ensure_ascii=False, indent=2),
         content_type="application/json"
     )
-    return f"gs://{GCS_BUCKET_NAME}/{blob_path}"
+    return f"gs://{bucket_name}/{blob_path}"
 
-def load_processed_registry() -> Dict[str, Any]:
+def load_processed_registry(ledger_bucket: str) -> Dict[str, Any]:
     """Load processed task IDs registry from GCS (or return an empty structure)."""
     client = _gcs_client()
-    bucket = client.bucket(GCS_BUCKET_NAME)
-    blob = bucket.blob(PROCESSED_TASKS_BLOB)
+    bucket = client.bucket(ledger_bucket)
+    blob = bucket.blob(GLOBAL_PROCESSED_BLOB_PATH)
     try:
         content = blob.download_as_text()
         obj = json.loads(content)
@@ -187,16 +213,16 @@ def load_processed_registry() -> Dict[str, Any]:
     obj["total_count"] = len(ids)
     return obj
 
-def save_processed_registry(registry: Dict[str, Any]) -> str:
+def save_processed_registry(registry: Dict[str, Any], ledger_bucket: str) -> str:
     """Save processed task IDs registry back to GCS and return its gs:// path."""
     client = _gcs_client()
-    bucket = client.bucket(GCS_BUCKET_NAME)
-    blob = bucket.blob(PROCESSED_TASKS_BLOB)
+    bucket = client.bucket(ledger_bucket)
+    blob = bucket.blob(GLOBAL_PROCESSED_BLOB_PATH)
     blob.upload_from_string(
         json.dumps(registry, ensure_ascii=False, indent=2),
         content_type="application/json"
     )
-    return f"gs://{GCS_BUCKET_NAME}/{PROCESSED_TASKS_BLOB}"
+    return f"gs://{ledger_bucket}/{GLOBAL_PROCESSED_BLOB_PATH}"
 
 
 # ---------------- LS snapshot/export ----------------
@@ -259,18 +285,35 @@ def fetch_tasks_via_snapshot(ls: LabelStudio, project_id: int, view_id: Optional
     return payload
 
 
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Third Phase: Groups Association export (SDK v2 snapshot)")
+    p.add_argument("--bucket", default=GCS_BUCKET_NAME, help="Default export bucket (used when inference is ambiguous)")
+    return p.parse_args()
+
+
 # ---------------- Main ----------------
 def main():
-    # Load processed tasks registry and coerce IDs to int
-    registry = load_processed_registry()
-    raw_ids = registry.get("processed_tasksID", []) or []
+    args = parse_args()
+    global GCS_BUCKET_NAME
+    GCS_BUCKET_NAME = args.bucket
+
+    # Fixed ledger bucket
+    ledger_bucket = LEDGER_BUCKET
+
+    # Preload registry if ledger bucket is provided up front
+    registry = {}
+    raw_ids: List[Any] = []
     processed_ids: set[int] = set()
-    for x in raw_ids:
-        try:
-            processed_ids.add(int(x))
-        except Exception:
-            pass
-    print(f"[registry] loaded {len(processed_ids)} processed IDs")
+    if ledger_bucket:
+        reg_init = load_processed_registry(ledger_bucket)
+        registry = reg_init or {}
+        raw_ids = registry.get("processed_tasksID", []) or []
+        for x in raw_ids:
+            try:
+                processed_ids.add(int(x))
+            except Exception:
+                pass
+        print(f"[registry] loaded {len(processed_ids)} processed IDs from {ledger_bucket}")
 
     # Connect + snapshot
     ls = connect_label_studio()
@@ -289,8 +332,8 @@ def main():
         if tid is None:
             continue
 
-        # Skip already processed tasks
-        if tid in processed_ids:
+        # Skip already processed tasks (if we have a registry loaded already)
+        if processed_ids and tid in processed_ids:
             already_processed_task_ids.append(tid)
             continue
 
@@ -356,25 +399,74 @@ def main():
 
     # ---- DIAGNOSTICS ----
     print("============== DEBUG / DIAGNOSTICS ==============")
-    print(f"Accepted (NEW this run): {len(set(new_task_ids))}")
-    print(f"Already processed: {len(set(already_processed_task_ids))}")
+    print(f"Accepted in snapshot    : {len(set(new_task_ids))}")
+    print(f"Already processed (pre) : {len(set(already_processed_task_ids))}")
     print(f"No annotations: {len(set(no_annotations_task_ids))}")
     print(f"Not accepted: {len(set(not_accepted_task_ids))}")
     print("==================================================")
 
-    # Timestamped filename (Asia/Jerusalem if available)
-    now_local = datetime.now(TZ) if TZ else datetime.now()
-    ts = now_local.strftime("%Y-%m-%d_%H-%M")
-    filename = f"LS_{PROJECT_ID}_ACCEPTED_{ts}_{len(outputs)}Tasks.json"
+    # Determine ledger bucket if not provided
+    if ledger_bucket is None:
+        # infer from outputs if possible
+        inferred = []
+        for out in outputs:
+            inferred.extend(_entry_buckets(out, GCS_BUCKET_NAME))
+        ledger_bucket = inferred[0] if inferred else GCS_BUCKET_NAME
+    print(f"Using global ledger bucket: {ledger_bucket}")
 
-    # Save export only if there are new tasks
-    if outputs:
-        gs_path = save_json_to_gcs(outputs, filename)
-        print(f"✅ Saved {len(outputs)} NEW accepted tasks to: {gs_path}")
-    else:
+    # Load processed tasks registry and coerce IDs to int (global)
+    registry = load_processed_registry(ledger_bucket)
+    raw_ids = registry.get("processed_tasksID", []) or []
+    processed_ids = set()
+    for x in raw_ids:
+        try:
+            processed_ids.add(int(x))
+        except Exception:
+            pass
+    print(f"[registry] loaded {len(processed_ids)} processed IDs")
+
+    # Filter outputs against processed IDs
+    fresh_outputs: List[Dict[str, Any]] = []
+    for out in outputs:
+        tid = out.get("task_id")
+        if tid is None:
+            fresh_outputs.append(out)
+            continue
+        if int(tid) in processed_ids:
+            continue
+        fresh_outputs.append(out)
+
+    print(f"New after dedupe        : {len(fresh_outputs)}")
+    if not fresh_outputs:
         print("ℹ️ No new tasks to export (all already processed or none accepted).")
+    # Partition outputs by bucket
+    bucket_outputs: Dict[str, List[Dict[str, Any]]] = {}
+    multi_bucket_entries: List[Dict[str, Any]] = []
+    for out in fresh_outputs:
+        buckets = _entry_buckets(out, GCS_BUCKET_NAME)
+        if len(buckets) > 1:
+            multi_bucket_entries.append({"task_id": out.get("task_id"), "buckets": buckets})
+        target = buckets[0]
+        bucket_outputs.setdefault(target, []).append(out)
 
-    # Always bump last_updated; add new IDs if any; then save registry
+    if multi_bucket_entries:
+        print("⚠ Entries with multiple buckets detected (using the first bucket listed):")
+        for entry in multi_bucket_entries[:10]:
+            print(f"   task_id={entry['task_id']} buckets={entry['buckets']}")
+        if len(multi_bucket_entries) > 10:
+            print(f"   ... and {len(multi_bucket_entries) - 10} more")
+
+    # Save per-bucket exports
+    for bucket_name, outs in bucket_outputs.items():
+        if not outs:
+            continue
+        now_local = datetime.now(TZ) if TZ else datetime.now()
+        ts = now_local.strftime("%Y-%m-%d_%H-%M")
+        filename = f"LS_{PROJECT_ID}_ACCEPTED_{ts}_{len(outs)}Tasks.json"
+        gs_path = save_json_to_gcs(outs, filename, bucket_name)
+        print(f"✅ Saved {len(outs)} NEW accepted tasks to: {gs_path}")
+
+    # Update global registry
     def _to_ints(seq):
         out = set()
         for x in seq or []:
@@ -385,21 +477,21 @@ def main():
         return out
 
     existing_ids_int = _to_ints(raw_ids)
-    new_ids_int      = _to_ints(new_task_ids)
+    added_ids_int    = _to_ints([out.get("task_id") for out in fresh_outputs])
+    merged_ids_int   = sorted(existing_ids_int | added_ids_int)
 
-    merged_ids_int = sorted(existing_ids_int | new_ids_int)
-
-    # Write back as strings (if your JSON historically used strings)
     registry["processed_tasksID"] = [str(x) for x in merged_ids_int]
     now_utc = datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
     registry["last_updated"] = now_utc
     registry["total_count"]  = len(merged_ids_int)
 
-    reg_path = save_processed_registry(registry)
+    reg_path = save_processed_registry(registry, ledger_bucket)
 
-    if new_ids_int:
-        print(f"📝 Updated processed registry with {len(new_ids_int)} new IDs → {reg_path}")
+    if added_ids_int:
+        print(f"📝 Updated processed registry with {len(added_ids_int)} new IDs → {reg_path}")
         print(f"🧮 Registry total_count: {len(merged_ids_int)}")
+        sample = list(sorted(added_ids_int))[:5]
+        print(f"🧾 Sample added IDs: {sample}")
     else:
         print(f"📝 Processed registry timestamp updated (no new IDs) → {reg_path}")
         print(f"🧮 Registry total_count: {len(merged_ids_int)}")

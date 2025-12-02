@@ -42,7 +42,6 @@ except ImportError:
 
 # ====================== Configuration ======================
 # You can modify these paths as needed
-CREDENTIALS_PATH = r"C:\Users\OrGil.AzureAD\OneDrive - AMPC\Desktop\Azimut.ai\recognition_gallery\resources\credentials.json"
 BUCKET_NAME = "outsource_data"
 BASE_PATH = "reidentification/bronze/raw_crops/ship_spotting"
 JSON_LABELS_PATH = "reidentification/bronze/json_lables/ship_spotting"  # Note: keeping the typo "lables" as in original
@@ -893,16 +892,13 @@ HTML_TEMPLATE = """
 # ====================== YOLO Detector Class ======================
 class VesselDetector:
     """YOLO-based vessel detector for generating Label Studio JSON annotations"""
-    
+    # ... unchanged ...
     def __init__(self):
         self.model = None
         self.model_loaded = False
-        
         if YOLO_AVAILABLE:
             self.load_model()
-    
     def load_model(self):
-        """Load the YOLO model"""
         try:
             if Path(YOLO_MODEL_PATH).exists():
                 self.model = YOLO(YOLO_MODEL_PATH)
@@ -1492,28 +1488,27 @@ class ShipspottingScraper:
         with open(json_file, 'w') as f:
             json.dump(metadata, f, indent=2)
 
-# ====================== GCS Manager (unchanged) ======================
+# ====================== GCS Manager (OAuth/ADC) ======================
 class GCSManager:
     """Manager for Google Cloud Storage operations"""
-    
+
     def __init__(self):
         self.client = None
         self.bucket = None
         self.scraper = ShipspottingScraper()
         self.initialize_client()
-        
+
     def initialize_client(self):
-        """Initialize GCS client"""
+        """Initialize GCS client using OAuth/Application Default Credentials (no JSON key)"""
         try:
-            credentials = service_account.Credentials.from_service_account_file(
-                CREDENTIALS_PATH
-            )
-            self.client = storage.Client(credentials=credentials)
+            # Uses ADC (e.g., 'gcloud auth application-default login' or attached SA on GCP runtimes)
+            self.client = storage.Client()
             self.bucket = self.client.bucket(BUCKET_NAME)
-            logger.info("Successfully initialized GCS client")
+            logger.info("Successfully initialized GCS client via ADC/OAuth")
         except Exception as e:
             logger.error(f"Failed to initialize GCS client: {str(e)}")
             raise
+
     
     def download_imo_photos(self, imo_number: str, local_imo_path: Path, vessel_details: Dict) -> int:
         """Download all photos for a specific IMO to its own folder"""
