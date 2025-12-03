@@ -165,11 +165,14 @@ class GCSClient:
             self.logger.error(f"Failed to download {gcs_path}: {e}")
             raise
 
-    def download_json_metadata(self, gcs_path: str) -> Optional[Dict[str, Any]]:
+    def download_json_metadata(self, gcs_path: str, default_bucket: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Download and parse JSON metadata from GCS."""
         if not gcs_path.startswith('gs://'):
-            self.logger.error(f"Invalid GCS path format: {gcs_path}")
-            return None
+            if default_bucket:
+                gcs_path = f"gs://{default_bucket}/{gcs_path.lstrip('/')}"
+            else:
+                self.logger.error(f"Invalid GCS path format: {gcs_path}")
+                return None
 
         path_parts = gcs_path[5:].split('/', 1)
         bucket_name = path_parts[0]
@@ -416,9 +419,10 @@ class LabelStudioProcessor:
 # Secondary Matching Engine
 # =========================
 class SecondaryMatcher:
-    def __init__(self, recognition_client: RecognitionClient, gcs_client: GCSClient):
+    def __init__(self, recognition_client: RecognitionClient, gcs_client: GCSClient, bucket_name: str):
         self.recognition_client = recognition_client
         self.gcs_client = gcs_client
+        self.bucket_name = bucket_name
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
         self.match_pairs: List[Tuple[str, str, Dict]] = []
 
@@ -557,17 +561,39 @@ class SecondaryMatcher:
             return None
 
     def _extract_bboxes_from_jsons(self, json_paths: List[str]) -> List[List[int]]:
+        """
+        Extract bbox from JSON metadata. Priority:
+        1) target.bounding_box.bounding_box
+        2) bounding_box.bounding_box (top-level)
+        3) data.target.bounding_box.bounding_box
+        """
         bboxes: List[List[int]] = []
         for jp in json_paths:
             try:
-                meta = self.gcs_client.download_json_metadata(jp)
-                if (meta and 'target' in meta and 'bounding_box' in meta['target']
-                        and 'bounding_box' in meta['target']['bounding_box']):
-                    bb = meta['target']['bounding_box']['bounding_box']
-                    if isinstance(bb, list) and len(bb) == 4:
-                        bboxes.append([int(v) for v in bb])
-                    else:
-                        self.logger.warning(f"Invalid bbox format in {jp}: {bb}")
+                meta = self.gcs_client.download_json_metadata(jp, default_bucket=self.bucket_name)
+                bbox = None
+                if meta and isinstance(meta, dict):
+                    # primary
+                    tgt = meta.get("target") or {}
+                    if isinstance(tgt, dict):
+                        bbox = (tgt.get("bounding_box") or {}).get("bounding_box")
+                    # secondary: top-level
+                    if bbox is None:
+                        bb_top = meta.get("bounding_box") or {}
+                        if isinstance(bb_top, dict):
+                            bbox = bb_top.get("bounding_box")
+                    # tertiary: nested under data.target
+                    if bbox is None:
+                        data = meta.get("data") or {}
+                        if isinstance(data, dict):
+                            tgt2 = data.get("target") or {}
+                            if isinstance(tgt2, dict):
+                                bbox = (tgt2.get("bounding_box") or {}).get("bounding_box")
+
+                if isinstance(bbox, list) and len(bbox) == 4:
+                    try:
+                        bboxes.append([int(v) for v in bbox])
+                    except Exception:
                         bboxes.append([0, 0, 0, 0])
                 else:
                     self.logger.warning(f"No bbox data in {jp}")
@@ -691,7 +717,7 @@ def main():
 
         # Initialize matcher
         logger.info("Initializing secondary matcher...")
-        matcher = SecondaryMatcher(recognition_client, gcs_client)
+        matcher = SecondaryMatcher(recognition_client, gcs_client, args.bucket)
 
         # Load groups to gallery
         logger.info("Loading clean groups to gallery...")
