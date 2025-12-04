@@ -88,7 +88,8 @@ class GCSClient:
         prefix = gcs_path.strip('/') + '/'
         uuids: Set[str] = set()
         try:
-            for blob in bucket.list_blobs(prefix=prefix, page_size=2000):
+            # Walk every blob under the user path, including subfolders.
+            for blob in self._iter_blobs(bucket, prefix):
                 rel = blob.name[len(prefix):]
                 for part in rel.split('/'):
                     if part and self._is_valid_uuid(part):
@@ -106,7 +107,7 @@ class GCSClient:
         prefix = gcs_path.strip('/') + '/'
         images_jsons: List[Tuple[str, str]] = []
         try:
-            for blob in bucket.list_blobs(prefix=prefix, page_size=2000):
+            for blob in self._iter_blobs(bucket, prefix):
                 if target_uuid not in blob.name:
                     continue
                 if blob.name.lower().endswith('.json'):
@@ -234,6 +235,14 @@ class GCSClient:
                 "(e.g., Storage Object Creator / Viewer / Admin).\n"
                 f"Original error: {exc}"
             )
+
+    def _iter_blobs(self, bucket: storage.Bucket, prefix: str):
+        """
+        Yield every blob under the prefix, recursing into subfolders.
+        Using delimiter=None (default) already recurses, but we keep this helper
+        so intent is explicit and shared between UUID and image discovery.
+        """
+        return bucket.list_blobs(prefix=prefix, page_size=2000)
 
 
 # ----------------------------- Group Builder ---------------------------------
